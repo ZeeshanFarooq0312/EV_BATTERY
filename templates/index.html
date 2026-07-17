@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EV Battery SOH Dashboard</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        .dashboard-container {
+            width: 100%;
+            max-width: 1000px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+
+        header h1 {
+            font-size: 2.2rem;
+            margin: 0;
+            background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        header p {
+            color: var(--text-muted);
+            margin-top: 10px;
+        }
+
+        .upload-section {
+            background-color: var(--card-bg);
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            align-items: flex-end;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+
+        .file-input-group, .select-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .file-input-group label, .select-group label {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        input[type="file"] {
+            background-color: #334155;
+            color: var(--text-main);
+            padding: 10px;
+            border-radius: 6px;
+            border: 1px solid #475569;
+            width: 250px;
+        }
+
+        select {
+            background-color: #334155;
+            color: var(--text-main);
+            padding: 10px;
+            border-radius: 6px;
+            border: 1px solid #475569;
+            width: 150px;
+            font-size: 0.95rem;
+            cursor: pointer;
+        }
+
+        select:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        button {
+            background-color: var(--accent);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 6px;
+            font-size: 1rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.3s;
+            height: 42px;
+        }
+
+        button:hover {
+            background-color: var(--accent-hover);
+        }
+
+        button:disabled {
+            background-color: #475569;
+            cursor: not-allowed;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+            display: none;
+        }
+
+        .metric-card {
+            background-color: var(--card-bg);
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+            border-top: 4px solid var(--accent);
+        }
+
+        .metric-card h3 {
+            margin: 0;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .metric-card .value {
+            font-size: 2rem;
+            font-weight: bold;
+            margin: 10px 0 0 0;
+            color: var(--text-main);
+        }
+
+        .metric-card.highlight {
+            border-top-color: var(--success);
+        }
+
+        .metric-card.cutoff {
+            border-top-color: var(--warning);
+        }
+
+        .plot-section {
+            background-color: var(--card-bg);
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            text-align: center;
+            display: none;
+        }
+
+        .plot-section img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            margin-top: 15px;
+        }
+
+        .loader {
+            display: none;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid var(--accent);
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+
+    <div class="dashboard-container">
+        <header>
+            <h1>EV Battery SOH & Curve Reconstruction</h1>
+            <p>Upload your SFT and FFT files to analyze battery health and reconstruct the full discharge curve.</p>
+        </header>
+
+        <div class="upload-section">
+            <div class="file-input-group">
+                <label for="sft_file">Upload SFT File (Partial)</label>
+                <input type="file" id="sft_file" accept=".csv">
+            </div>
+            <div class="file-input-group">
+                <label for="fft_file">Upload FFT File (Full Ground Truth)</label>
+                <input type="file" id="fft_file" accept=".csv">
+            </div>
+            <div class="select-group">
+                <label for="voltageCutoff">Voltage Cutoff</label>
+                <select id="voltageCutoff">
+                    <option value="3.2">3.2V</option>
+                    <option value="2.5">2.5V</option>
+                </select>
+            </div>
+            <button id="analyzeBtn" onclick="analyzeBattery()">Analyze Battery</button>
+        </div>
+
+        <div class="loader" id="loader"></div>
+
+        <div class="metrics-grid" id="metricsGrid">
+            <div class="metric-card">
+                <h3>Predicted SOH</h3>
+                <p class="value" id="sohValue">--%</p>
+            </div>
+            <div class="metric-card">
+                <h3>Predicted Capacity</h3>
+                <p class="value" id="capValue">-- Ah</p>
+            </div>
+            <div class="metric-card highlight">
+                <h3>Actual Capacity (FFT)</h3>
+                <p class="value" id="actualCapValue">-- Ah</p>
+            </div>
+            <div class="metric-card cutoff">
+                <h3>Capacity at <span id="cutoffLabel">3.2V</span></h3>
+                <p class="value" id="cutoffCapValue">-- Ah</p>
+            </div>
+        </div>
+
+        <div class="plot-section" id="plotSection">
+            <h2>Curve Overlay Comparison</h2>
+            <img id="plotImage" src="" alt="Reconstruction Plot">
+        </div>
+    </div>
+
+    <script>
+        async function analyzeBattery() {
+            const sftFile = document.getElementById('sft_file').files[0];
+            const fftFile = document.getElementById('fft_file').files[0];
+            const voltageCutoff = document.getElementById('voltageCutoff').value;
+            const btn = document.getElementById('analyzeBtn');
+            const loader = document.getElementById('loader');
+
+            if (!sftFile || !fftFile) {
+                alert("Please upload both SFT and FFT files.");
+                return;
+            }
+
+            // UI Loading State
+            btn.disabled = true;
+            btn.innerText = "Analyzing...";
+            loader.style.display = "block";
+            document.getElementById('metricsGrid').style.display = "none";
+            document.getElementById('plotSection').style.display = "none";
+
+            const formData = new FormData();
+            formData.append('sft_file', sftFile);
+            formData.append('fft_file', fftFile);
+            formData.append('voltage_cutoff', voltageCutoff);
+
+            try {
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    // Update Metrics
+                    document.getElementById('sohValue').innerText = data.soh + "%";
+                    document.getElementById('capValue').innerText = data.capacity + " Ah";
+                    document.getElementById('actualCapValue').innerText = data.actual_capacity + " Ah";
+                    document.getElementById('cutoffCapValue').innerText = data.cutoff_capacity + " Ah";
+                    document.getElementById('cutoffLabel').innerText = voltageCutoff + "V";
+                    
+                    // Update Plot
+                    document.getElementById('plotImage').src = "data:image/png;base64," + data.plot;
+
+                    // Show Results
+                    document.getElementById('metricsGrid').style.display = "grid";
+                    document.getElementById('plotSection').style.display = "block";
+                } else {
+                    alert("Error: " + data.error);
+                }
+            } catch (error) {
+                alert("An error occurred while analyzing.");
+                console.error(error);
+            } finally {
+                // Reset UI
+                btn.disabled = false;
+                btn.innerText = "Analyze Battery";
+                loader.style.display = "none";
+            }
+        }
+    </script>
+</body>
+</html>
