@@ -15,6 +15,7 @@
             --success: #10b981;
             --danger: #ef4444;
             --warning: #f59e0b;
+            --knee: #a855f7;
         }
 
         body {
@@ -164,6 +165,10 @@
             border-top-color: var(--warning);
         }
 
+        .metric-card.knee {
+            border-top-color: var(--knee);
+        }
+
         .plot-section {
             background-color: var(--card-bg);
             padding: 20px;
@@ -198,8 +203,8 @@
 
     <div class="dashboard-container">
         <header>
-            <h1>EV Battery SOH & Curve Reconstruction</h1>
-            <p>Upload your SFT and FFT files to analyze battery health and reconstruct the full discharge curve.</p>
+            <h1>EV Battery SOH & Complete Global Curve Reconstruction</h1>
+            <p>Upload your SFT and FFT files to analyze battery health and reconstruct the complete global discharge curve.</p>
         </header>
 
         <div class="upload-section">
@@ -236,15 +241,39 @@
                 <h3>Actual Capacity (FFT)</h3>
                 <p class="value" id="actualCapValue">-- Ah</p>
             </div>
+            <div class="metric-card highlight">
+                <h3>Actual SOH (Capacity/156)</h3>
+                <p class="value" id="actualSohValue">--%</p>
+            </div>
             <div class="metric-card cutoff">
                 <h3>Capacity at <span id="cutoffLabel">3.2V</span></h3>
                 <p class="value" id="cutoffCapValue">-- Ah</p>
             </div>
+            <div class="metric-card">
+                <h3>Reconstruction MAE</h3>
+                <p class="value" id="maeValue">-- mV</p>
+            </div>
+            <div class="metric-card knee">
+                <h3>Predicted Knee Point</h3>
+                <p class="value" id="predKneeValue">-- Ah</p>
+            </div>
+            <div class="metric-card knee">
+                <h3>Actual Knee Point</h3>
+                <p class="value" id="actualKneeValue">-- Ah</p>
+            </div>
+            <div class="metric-card knee">
+                <h3>Knee Location Error</h3>
+                <p class="value" id="kneeErrorValue">-- Ah</p>
+            </div>
         </div>
 
         <div class="plot-section" id="plotSection">
-            <h2>Curve Overlay Comparison</h2>
-            <img id="plotImage" src="" alt="Reconstruction Plot">
+            <h2>Complete Global Curve Reconstruction</h2>
+            <p style="color: var(--text-muted); margin-top: -10px; margin-bottom: 15px;">
+                The model predicts the entire discharge curve (0-100% capacity) from the short SFT test - not just a missing segment.
+                Stars mark the detected discharge knee (the point of sharpest bend in the last half of the curve) on both the real and reconstructed curves.
+            </p>
+            <img id="plotImage" src="" alt="Complete Global Curve Reconstruction Plot">
         </div>
     </div>
 
@@ -286,9 +315,14 @@
                     document.getElementById('sohValue').innerText = data.soh + "%";
                     document.getElementById('capValue').innerText = data.capacity + " Ah";
                     document.getElementById('actualCapValue').innerText = data.actual_capacity + " Ah";
+                    document.getElementById('actualSohValue').innerText = data.actual_soh + "%";
                     document.getElementById('cutoffCapValue').innerText = data.cutoff_capacity + " Ah";
                     document.getElementById('cutoffLabel').innerText = voltageCutoff + "V";
-                    
+                    document.getElementById('maeValue').innerText = data.mae + " mV";
+                    document.getElementById('predKneeValue').innerText = data.pred_knee_ah !== null ? (data.pred_knee_ah + " Ah") : "N/A";
+                    document.getElementById('actualKneeValue').innerText = data.actual_knee_ah !== null ? (data.actual_knee_ah + " Ah") : "N/A";
+                    document.getElementById('kneeErrorValue').innerText = data.knee_error_ah !== null ? (data.knee_error_ah + " Ah") : "N/A";
+
                     // Update Plot
                     document.getElementById('plotImage').src = "data:image/png;base64," + data.plot;
 

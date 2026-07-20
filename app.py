@@ -16,14 +16,15 @@ import matplotlib.pyplot as plt
 
 from flask import Flask, render_template, request, jsonify
 from scipy.interpolate import interp1d
-from scipy.signal import savgol_filter
-from scipy.ndimage import gaussian_filter1d
 
 warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+TEST_CASE_DIR = os.path.join(APP_DIR, 'TEST_CASE')
 
 # ==========================================
 # LOAD MODELS AT STARTUP
@@ -36,23 +37,23 @@ soh_feature_names = {}
 for c_rate in [0.3, 1.0]:
     c_str = str(c_rate).replace('.', '_')
     try:
-        soh_models[c_rate] = joblib.load(f'soh_model_{c_str}c.pkl')
-        soh_feature_names[c_rate] = joblib.load(f'feature_names_{c_str}c.pkl')
+        soh_models[c_rate] = joblib.load(os.path.join(APP_DIR, f'soh_model_{c_str}c.pkl'))
+        soh_feature_names[c_rate] = joblib.load(os.path.join(APP_DIR, f'feature_names_{c_str}c.pkl'))
         print(f"✅ SOH model for {c_rate}C loaded")
     except Exception as e:
         print(f"❌ Error loading SOH model for {c_rate}C: {e}")
 
-# 2. Load Reconstruction Models
+# 2. Load Reconstruction Models (v10 - complete global curve, knee-focused resolution)
 try:
-    recon_model_0_3c = joblib.load('/home/ioptime/Desktop/zeeshan_farooq/ev_battery_version_2 (2)/ev_battery_version_2/new_tech/TEST_CASE/reconstruction_model_0_3C_v7_41chk.pkl')
-    print("✅ 0.3C reconstruction model loaded")
+    recon_model_0_3c = joblib.load(os.path.join(TEST_CASE_DIR, 'reconstruction_model_0_3C_v10_knee.pkl'))
+    print("✅ 0.3C reconstruction model (v10 knee) loaded")
 except Exception as e:
     print(f"⚠️ 0.3C reconstruction model not found: {e}")
     recon_model_0_3c = None
 
 try:
-    recon_model_1_0c = joblib.load('/home/ioptime/Desktop/zeeshan_farooq/ev_battery_version_2 (2)/ev_battery_version_2/new_tech/TEST_CASE/reconstruction_model_1_0C_v7_41chk.pkl')
-    print("✅ 1.0C reconstruction model loaded")
+    recon_model_1_0c = joblib.load(os.path.join(TEST_CASE_DIR, 'reconstruction_model_1_0C_v10_knee.pkl'))
+    print("✅ 1.0C reconstruction model (v10 knee) loaded")
 except Exception as e:
     print(f"⚠️ 1.0C reconstruction model not found: {e}")
     recon_model_1_0c = None
@@ -63,16 +64,41 @@ print("✅ Startup complete!\n")
 # CONSTANTS
 # ==========================================
 NOMINAL_CAPACITY = 156.0
-SFT_CHECKPOINTS_COUNT = 40
-HEAD_CHECKPOINTS_PCT = [round(i * 0.025, 3) for i in range(41)]
+# Non-uniform, knee-dense checkpoint grid -- must match curve_train.py exactly (positional).
+HEAD_CHECKPOINTS_PCT = [
+    0.0, 0.0125, 0.025, 0.0375, 0.05, 0.0625, 0.075, 0.0875, 0.1, 0.125, 0.15, 0.175, 0.2, 0.225, 0.25, 0.275, 0.3, 0.325,
+    0.35, 0.375, 0.4, 0.425, 0.45, 0.475, 0.5, 0.525, 0.55, 0.575, 0.6, 0.625, 0.65, 0.675, 0.7, 0.7125, 0.725, 0.7375,
+    0.75, 0.7625, 0.775, 0.7875, 0.8, 0.8125, 0.825, 0.8375, 0.85, 0.8625, 0.875, 0.8875, 0.9, 0.9125, 0.925, 0.9375,
+    0.95, 0.9625, 0.975, 0.9875, 1.0
+]
+SFT_SAMPLE_FRACTIONS = [
+    0.0, 0.026, 0.052, 0.078, 0.104, 0.13, 0.156, 0.182, 0.208, 0.234, 0.26, 0.286, 0.312, 0.338, 0.364, 0.39, 0.416,
+    0.442, 0.468, 0.494, 0.52, 0.546, 0.572, 0.598, 0.624, 0.65, 0.6635, 0.6764, 0.6894, 0.7023, 0.7153, 0.7282, 0.7412,
+    0.7541, 0.767, 0.78, 0.7929, 0.8059, 0.8188, 0.8318, 0.8447, 0.8576, 0.8706, 0.8835, 0.8965, 0.9094, 0.9223, 0.9353,
+    0.9482, 0.9612, 0.9741, 0.9871, 1.0
+]
 
 # ==========================================
 # CORE LOGIC FUNCTIONS
 # ==========================================
-def get_actual_capacity_from_fft(df):
-    if 'AHDischarge' in df.columns:
-        return float(df['AHDischarge'].max())
-    return 0.0
+def extract_and_resample_curve(df):
+    """Filters to the valid discharge window and re-zeros Ah. Shared by both the
+    uploaded SFT and FFT curves so features/targets line up with training."""
+    cell_cols = [c for c in df.columns if 'Cell' in c and 'Temperature' not in c]
+    df['Mean_Cell_Voltage'] = df[cell_cols].mean(axis=1)
+    mask = (df['Mean_Cell_Voltage'] < 4.15) & (df['Mean_Cell_Voltage'] > 2.0)
+    discharge_df = df[mask].copy()
+    discharge_df = discharge_df.sort_values('AHDischarge')
+    discharge_df['Ah_Relative'] = discharge_df['AHDischarge'] - discharge_df['AHDischarge'].iloc[0]
+
+    ah = discharge_df['Ah_Relative'].values
+    v = discharge_df['Mean_Cell_Voltage'].values
+    cell_std = df[cell_cols].std(axis=1)[mask].values if len(cell_cols) > 0 else None
+    return ah, v, cell_std
+
+
+def compute_soh(total_capacity_ah):
+    return float((total_capacity_ah / NOMINAL_CAPACITY) * 100.0)
 
 def extract_soh_features(df, c_rate):
     features = {}
@@ -153,170 +179,77 @@ def extract_enhanced_features(sft_v, sft_ah, cell_data=None):
     else:
         features['cell_imbalance_mean'] = 0.0
         features['cell_imbalance_std'] = 0.0
-        
+
+    knee_idx = int(np.argmax(np.abs(dv_dah)))
+    features['tail_knee_pct'] = float(sft_ah[knee_idx] / (sft_ah[-1] + 1e-5))
+    features['tail_knee_slope'] = float(dv_dah[knee_idx])
+
     return features
 
-def extract_true_fft(df):
-    cell_cols = [c for c in df.columns if 'Cell' in c and 'Temperature' not in c]
-    df['Mean_Cell_Voltage'] = df[cell_cols].mean(axis=1)
-    discharge_df = df[(df['Mean_Cell_Voltage'] < 4.15) & (df['Mean_Cell_Voltage'] > 2.0)].copy()
-    if 'AHDischarge' in discharge_df.columns and discharge_df['AHDischarge'].max() > 0:
-        discharge_df = discharge_df.sort_values('AHDischarge')
-        discharge_df['Ah_Relative'] = discharge_df['AHDischarge'] - discharge_df['AHDischarge'].iloc[0]
-    else:
-        discharge_df['Ah_Relative'] = np.arange(len(discharge_df))
-    return discharge_df['Ah_Relative'].values, discharge_df['Mean_Cell_Voltage'].values
+def detect_knee(ah, v, search_start_pct=0.5, search_end_pct=0.99):
+    """Finds the sharpest bend (max perpendicular distance from the chord
+    connecting the search window's endpoints) in the tail of a discharge
+    curve -- the discharge knee. Same method used to measure real knee
+    locations (0.3C/1.0C packs show it at ~83-92% of total capacity)."""
+    total = ah[-1]
+    mask = (ah >= search_start_pct * total) & (ah <= search_end_pct * total)
+    idx = np.where(mask)[0]
+    if len(idx) < 3:
+        return None, None
 
-def reconstruct_curve(sft_df, pred_capacity, c_rate=0.3, target_end_voltage=2.5):
-    """Reconstruct full discharge curve with smooth splicing using low-pass filtering."""
-    cell_cols = [c for c in sft_df.columns if 'Cell' in c and 'Temperature' not in c]
-    sft_df['Mean_Cell_Voltage'] = sft_df[cell_cols].mean(axis=1)
-    
-    sft_v = sft_df['Mean_Cell_Voltage'].values
-    sft_ah = sft_df['AHDischarge'].values
-    sft_start_v = sft_v[0]
-    
-    sft_delta_ah = sft_ah[-1] - sft_ah[0]
-    target_sft_start_ah = pred_capacity - sft_delta_ah
-    
-    sft_sampled_v = [float(x) for x in np.linspace(sft_v[0], sft_v[-1], SFT_CHECKPOINTS_COUNT)]
-    
-    dv_dah = np.gradient(sft_v, sft_ah)
-    d2v_dah2 = np.gradient(dv_dah, sft_ah)
-    mid_idx = len(sft_v) // 2
-    
-    cell_std_data = sft_df[cell_cols].std(axis=1).values if len(cell_cols) > 0 else None
-    imb_mean = float(np.mean(cell_std_data)) if cell_std_data is not None else 0.0
-    imb_std = float(np.std(cell_std_data)) if cell_std_data is not None else 0.0
-    
-    estimated_soh = (pred_capacity / NOMINAL_CAPACITY) * 100.0
-    
-    features = sft_sampled_v + [
+    ah_w, v_w = ah[idx], v[idx]
+    ah_n = (ah_w - ah_w[0]) / (ah_w[-1] - ah_w[0] + 1e-9)
+    v_n = (v_w - v_w[0]) / (v_w[-1] - v_w[0] + 1e-9)
+
+    x1, y1 = ah_n[0], v_n[0]
+    x2, y2 = ah_n[-1], v_n[-1]
+    num = np.abs((y2 - y1) * ah_n - (x2 - x1) * v_n + x2 * y1 - y2 * x1)
+    den = np.sqrt((y2 - y1) ** 2 + (x2 - x1) ** 2) + 1e-9
+    dist = num / den
+
+    knee_local_idx = int(np.argmax(dist))
+    knee_idx = idx[knee_local_idx]
+    return float(ah[knee_idx]), float(v[knee_idx])
+
+
+def reconstruct_full_curve(sft_df, pred_capacity, c_rate=0.3):
+    """The v10 model predicts all checkpoints across the COMPLETE global curve
+    (0-100% of pred_capacity) directly from the observed SFT tail segment -- no
+    splicing/blending needed. Checkpoints and SFT sampling are both non-uniform
+    (dense near 72-100%) to better resolve the discharge knee."""
+    sft_ah, sft_v, sft_cell_std = extract_and_resample_curve(sft_df)
+    sft_delta_ah = sft_ah[-1]
+    cutoff_ah = pred_capacity - sft_delta_ah
+
+    estimated_soh = compute_soh(pred_capacity)
+    sft_sampled_v = [np.interp(frac * sft_ah[-1], sft_ah, sft_v) for frac in SFT_SAMPLE_FRACTIONS]
+    feats = extract_enhanced_features(sft_v, sft_ah, sft_cell_std)
+
+    features = list(sft_sampled_v) + [
         estimated_soh,
-        float((sft_v[mid_idx] - sft_v[0]) / (sft_ah[mid_idx] - sft_ah[0] + 1e-5)),
-        float((sft_v[-1] - sft_v[mid_idx]) / (sft_ah[-1] - sft_ah[mid_idx] + 1e-5)),
-        float((sft_v[-1] - sft_v[0]) / (sft_ah[-1] - sft_ah[0] + 1e-5)),
-        float(np.mean(np.abs(d2v_dah2))),
-        float(np.max(np.abs(d2v_dah2))),
-        float(np.std(sft_v)),
-        float(sft_v[0] - sft_v[-1]),
-        float(np.sum((sft_v > 3.4) & (sft_v < 3.7)) / len(sft_v)),
-        float(sft_v[int(len(sft_v) * 0.8)] - sft_v[-1]),
-        float((sft_v[-1] - sft_v[int(len(sft_v) * 0.8)]) / (sft_ah[-1] - sft_ah[int(len(sft_ah) * 0.8)] + 1e-5)),
-        imb_mean,
-        imb_std,
-        float(target_sft_start_ah)
+        feats['initial_slope'], feats['final_slope'], feats['overall_slope'],
+        feats['mean_curvature'], feats['max_curvature'], feats['voltage_std'],
+        feats['voltage_range'], feats['plateau_length'], feats['end_voltage_drop'],
+        feats['end_slope'], feats['cell_imbalance_mean'], feats['cell_imbalance_std'],
+        feats['tail_knee_pct'], feats['tail_knee_slope'],
+        float(cutoff_ah)
     ]
-    
+
     if abs(c_rate - 1.0) < 0.1 and recon_model_1_0c is not None:
         model = recon_model_1_0c
     elif recon_model_0_3c is not None:
         model = recon_model_0_3c
     else:
         raise ValueError("No reconstruction model available")
-    
-    X_input = np.array([features])
-    predicted_head_v = model.predict(X_input)[0]
-    
-    head_ah_valid = [pct * target_sft_start_ah for pct in HEAD_CHECKPOINTS_PCT]
-    head_v_valid = list(predicted_head_v)
-    
-    valid_mask = [(v > 2.0) and not np.isnan(v) for v in head_v_valid]
-    head_ah_valid = [ah for ah, valid in zip(head_ah_valid, valid_mask) if valid]
-    head_v_valid = [v for v, valid in zip(head_v_valid, valid_mask) if valid]
-    
-    head_ah_dense = np.linspace(0, target_sft_start_ah, 200)
-    interp_func = interp1d(head_ah_valid, head_v_valid, kind='cubic', fill_value='extrapolate')
-    head_v_dense = interp_func(head_ah_dense)
-    
-    for i in range(1, len(head_v_dense)):
-        if head_v_dense[i] > head_v_dense[i-1]:
-            head_v_dense[i] = head_v_dense[i-1] - 0.0005
-    
-    rebased_sft_ah = np.linspace(target_sft_start_ah, pred_capacity, len(sft_ah))
-    
-    full_ah = np.concatenate([head_ah_dense, rebased_sft_ah])
-    full_v = np.concatenate([head_v_dense, sft_v])
-    
-    # ==========================================
-    # SMOOTH BLENDING AT SPLICE POINT
-    # ==========================================
-    n_head = len(head_v_dense)
-    n_sft = len(sft_v)
-    
-    transition_size = min(20, n_head - 1, n_sft - 1)
-    splice_idx = n_head - 1
-    transition_start = max(0, splice_idx - transition_size)
-    transition_end = min(len(full_v), splice_idx + transition_size + 1)
-    
-    head_segment = full_v[transition_start:splice_idx+1].copy()
-    sft_segment = full_v[splice_idx:transition_end].copy()
-    
-    blend_length = min(len(head_segment), len(sft_segment))
-    head_segment = head_segment[:blend_length]
-    sft_segment = sft_segment[:blend_length]
-    
-    x = np.linspace(-6, 6, blend_length)
-    weights = 1 / (1 + np.exp(-x))
-    
-    blended_segment = (1 - weights) * head_segment + weights * sft_segment
-    full_v[transition_start:transition_start+blend_length] = blended_segment
-    
-    # Apply Savitzky-Golay filter for smoothness
-    window_length = min(101, len(full_v) // 3)
-    if window_length % 2 == 0:
-        window_length -= 1
-    if window_length >= 5:
-        full_v = savgol_filter(full_v, window_length, polyorder=3)
-    
-    # Apply Gaussian smoothing at splice region only
-    splice_region_start = max(0, splice_idx - 60)
-    splice_region_end = min(len(full_v), splice_idx + 60)
-    
-    splice_region = full_v[splice_region_start:splice_region_end].copy()
-    smoothed_region = gaussian_filter1d(splice_region, sigma=2.0)
-    
-    full_v[splice_region_start:splice_region_end] = 0.5 * splice_region + 0.5 * smoothed_region
-    
-    # ==========================================
-    # EXTENSION LOGIC
-    # ==========================================
-    extended_mask = np.zeros(len(full_v), dtype=bool)
-    
-    if full_v[-1] > target_end_voltage:
-        print(f"⚠️  Curve ends at {full_v[-1]:.2f}V, extending to {target_end_voltage}V...")
-        
-        n_tail_samples = min(20, len(full_v) - 1)
-        tail_ah_sample = full_ah[-n_tail_samples:]
-        tail_v_sample = full_v[-n_tail_samples:]
-        
-        if len(tail_ah_sample) >= 5:
-            coeffs = np.polyfit(tail_ah_sample, tail_v_sample, 2)
-            poly_func = np.poly1d(coeffs)
-            
-            a, b, c = coeffs[0], coeffs[1], coeffs[2] - target_end_voltage
-            discriminant = b**2 - 4*a*c
-            
-            if discriminant >= 0 and a != 0:
-                ah_at_cutoff_1 = (-b + np.sqrt(discriminant)) / (2*a)
-                ah_at_cutoff_2 = (-b - np.sqrt(discriminant)) / (2*a)
-                ah_at_cutoff = max(ah_at_cutoff_1, ah_at_cutoff_2)
-                
-                if ah_at_cutoff > full_ah[-1]:
-                    n_extend = 50
-                    extend_ah = np.linspace(full_ah[-1], ah_at_cutoff, n_extend)[1:]
-                    extend_v = poly_func(extend_ah)
-                    extend_v = np.maximum(extend_v, target_end_voltage)
-                    
-                    extended_mask = np.zeros(len(full_ah) + len(extend_ah), dtype=bool)
-                    extended_mask[len(full_ah):] = True
-                    
-                    full_ah = np.concatenate([full_ah, extend_ah])
-                    full_v = np.concatenate([full_v, extend_v])
-                    
-                    print(f"✅ Extended curve to {target_end_voltage}V (at {ah_at_cutoff:.2f} Ah)")
-    
-    return full_ah, full_v, target_sft_start_ah, extended_mask
+
+    pred_v = model.predict(np.array([features]))[0]
+    recon_ah = np.array([pct * pred_capacity for pct in HEAD_CHECKPOINTS_PCT])
+
+    dense_ah = np.linspace(recon_ah.min(), recon_ah.max(), 300)
+    interp_func = interp1d(recon_ah, pred_v, kind='cubic', fill_value='extrapolate')
+    dense_v = np.clip(interp_func(dense_ah), 1.8, 4.3)
+
+    return dense_ah, dense_v, cutoff_ah
 
 # ==========================================
 # FLASK ROUTES
@@ -369,17 +302,15 @@ def analyze():
         pred_capacity = (soh_whole_number / 100.0) * NOMINAL_CAPACITY
         print(f"Predicted SOH: {pred_soh:.2f}%, Capacity: {pred_capacity:.2f} Ah")
 
-        print("Extracting actual capacity from FFT...")
-        actual_capacity = get_actual_capacity_from_fft(fft_df)
-        print(f"Actual Capacity (FFT): {actual_capacity:.2f} Ah")
-
-        print(f"Reconstructing curve (extending to {voltage_cutoff}V if needed)...")
-        recon_ah, recon_v, splice_ah, extended_mask = reconstruct_curve(sft_df, pred_capacity, c_rate, voltage_cutoff)
-        print(f"Reconstruction complete. Splice at: {splice_ah:.2f} Ah")
-
         print("Extracting FFT ground truth...")
-        fft_ah, fft_v = extract_true_fft(fft_df)
-        print(f"Found {len(fft_ah)} FFT points")
+        fft_ah, fft_v, _ = extract_and_resample_curve(fft_df)
+        actual_capacity = float(fft_ah[-1])
+        actual_soh = compute_soh(actual_capacity)
+        print(f"Found {len(fft_ah)} FFT points. Actual Capacity: {actual_capacity:.2f} Ah, Actual SOH: {actual_soh:.2f}%")
+
+        print("Reconstructing complete global curve from SFT...")
+        recon_ah, recon_v, cutoff_ah = reconstruct_full_curve(sft_df, pred_capacity, c_rate)
+        print(f"Reconstruction complete. SFT tail starts at {cutoff_ah:.2f} Ah of the reconstructed curve.")
 
         cutoff_idx = np.where(recon_v <= voltage_cutoff)[0]
         if len(cutoff_idx) > 0:
@@ -404,27 +335,35 @@ def analyze():
             mae = 0.0
         print(f"Reconstruction MAE: {mae:.2f} mV")
 
+        print("Detecting discharge knee point...")
+        pred_knee_ah, pred_knee_v = detect_knee(recon_ah, recon_v)
+        actual_knee_ah, actual_knee_v = detect_knee(fft_ah, fft_v)
+        knee_error_ah = abs(pred_knee_ah - actual_knee_ah) if (pred_knee_ah is not None and actual_knee_ah is not None) else None
+        if pred_knee_ah is not None:
+            print(f"   Predicted knee: {pred_knee_ah:.2f} Ah @ {pred_knee_v:.3f}V")
+        if actual_knee_ah is not None:
+            print(f"   Actual knee:    {actual_knee_ah:.2f} Ah @ {actual_knee_v:.3f}V")
+
         print("Generating plot...")
         plt.figure(figsize=(10, 6))
-        
+
         plt.plot(fft_ah, fft_v, label='Real FFT (Ground Truth)', color='#2563eb', linewidth=2.5, alpha=0.9)
-        
-        if np.any(extended_mask):
-            plt.plot(recon_ah[~extended_mask], recon_v[~extended_mask], 
-                    label='ML Reconstructed from SFT', color='#dc2626', linewidth=2, linestyle='--')
-            plt.plot(recon_ah[extended_mask], recon_v[extended_mask], 
-                    label=f'Extended to {voltage_cutoff}V', color='#f59e0b', linewidth=2, linestyle=':')
-        else:
-            plt.plot(recon_ah, recon_v, label='ML Reconstructed from SFT', color='#dc2626', linewidth=2, linestyle='--')
-        
-        plt.axvline(x=splice_ah, color='#16a34a', linestyle=':', linewidth=2, label=f'Splice Point ({splice_ah:.2f} Ah)')
-        
+        plt.plot(recon_ah, recon_v, label='ML Reconstructed (Complete Global Curve)', color='#dc2626', linewidth=2, linestyle='--')
+        plt.axvline(x=cutoff_ah, color='#16a34a', linestyle=':', linewidth=2, label=f'SFT Tail Start ({cutoff_ah:.2f} Ah)')
+
         if cutoff_point_idx >= 0:
-            plt.scatter([recon_ah[cutoff_point_idx]], [recon_v[cutoff_point_idx]], 
+            plt.scatter([recon_ah[cutoff_point_idx]], [recon_v[cutoff_point_idx]],
                        color='#f59e0b', s=150, zorder=5, label=f'{voltage_cutoff}V Cutoff',
                        marker='o', edgecolors='white', linewidths=2)
-        
-        plt.title(f'Reconstruction Validation | Pred SOH: {pred_soh:.1f}% | Actual: {actual_capacity:.1f} Ah', 
+
+        if actual_knee_ah is not None:
+            plt.scatter([actual_knee_ah], [actual_knee_v], color='#2563eb', s=220, zorder=6,
+                       label=f'Actual Knee ({actual_knee_ah:.2f} Ah)', marker='*', edgecolors='white', linewidths=1.5)
+        if pred_knee_ah is not None:
+            plt.scatter([pred_knee_ah], [pred_knee_v], color='#dc2626', s=220, zorder=6,
+                       label=f'Predicted Knee ({pred_knee_ah:.2f} Ah)', marker='*', edgecolors='white', linewidths=1.5)
+
+        plt.title(f'Complete Global Curve Reconstruction | Pred SOH: {pred_soh:.1f}% | Actual SOH: {actual_soh:.1f}%',
                   fontsize=14, fontweight='bold', pad=15)
         plt.xlabel('Capacity Delivered (Ah)', fontsize=12)
         plt.ylabel('Mean Cell Voltage (V)', fontsize=12)
@@ -442,10 +381,16 @@ def analyze():
 
         return jsonify({
             'soh': round(pred_soh, 2),
-            'capacity': int(round(pred_capacity)),  # <-- FIXED: Returns clean whole number
+            'capacity': int(round(pred_capacity)),
             'actual_capacity': round(actual_capacity, 2),
+            'actual_soh': round(actual_soh, 2),
             'cutoff_capacity': round(cutoff_capacity, 2),
             'mae': round(mae, 2),
+            'pred_knee_ah': round(pred_knee_ah, 2) if pred_knee_ah is not None else None,
+            'pred_knee_v': round(pred_knee_v, 3) if pred_knee_v is not None else None,
+            'actual_knee_ah': round(actual_knee_ah, 2) if actual_knee_ah is not None else None,
+            'actual_knee_v': round(actual_knee_v, 3) if actual_knee_v is not None else None,
+            'knee_error_ah': round(knee_error_ah, 2) if knee_error_ah is not None else None,
             'plot': plot_url
         })
         
