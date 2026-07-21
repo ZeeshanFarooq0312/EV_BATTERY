@@ -19,6 +19,75 @@ SOH_GROUND_TRUTH = {
     'pk5': {0.3: 86.78}  # No 1.0C data available yet
 }
 
+NOMINAL_CAPACITY = 156.0
+
+# Physics-informed synthetic augmentation: scale each real pack's own full
+# discharge curve down (or up) to a target SOH anywhere in 80-100%, and add a
+# C-rate specific extra IR sag proportional to the extra degradation implied.
+# Critically, this RESAMPLES the whole curve (rows, every cell column, every
+# temperature column) proportionally to the new target capacity, rather than
+# just relabeling the AHDischarge column on the original row count -- the
+# first attempt at this kept the same row count for every synthetic SOH,
+# which broke extract_features_from_slice's row-count-based windowing (a
+# lower-capacity curve should physically have proportionally fewer rows at
+# the same sampling rate) and made LOPO accuracy worse, not better.
+SYNTHETIC_SOH_FLOOR = 80.0
+SYNTHETIC_SOH_CEILING = 100.0
+SYNTH_SAMPLES_PER_TEMPLATE = 100
+EXTRA_IR_DROP_PER_SOH_POINT = {'0.3C': 0.03, '1.0C': 0.015}
+
+
+def generate_synthetic_soh_dataframe(df, template_soh, target_soh, c_rate_name):
+    """Return a new dataframe representing a synthetic discharge at target_soh,
+    built from `df` (a real full-curve template). Every cell/temperature
+    column is resampled at the SAME fractional position through the template
+    curve, with row count scaled to the target capacity so downstream
+    row-count-based feature extraction sees a physically consistent curve."""
+    cell_cols = [c for c in df.columns if 'Cell' in c and 'Temperature' not in c]
+    temp_cols = [c for c in df.columns if 'Temperature' in c]
+    if 'AHDischarge' not in df.columns or len(cell_cols) == 0:
+        return None
+
+    ah = df['AHDischarge'].values
+    ah0 = ah[0]
+    ah_rel = ah - ah0
+    template_total_cap = float(ah_rel[-1])
+    if template_total_cap <= 0:
+        return None
+
+    target_total_cap = (target_soh / 100.0) * NOMINAL_CAPACITY
+    scale = target_total_cap / template_total_cap
+
+    original_rows = len(df)
+    new_rows = max(50, int(round(original_rows * scale)))
+    frac = np.linspace(0.0, 1.0, new_rows)
+    src_ah = frac * template_total_cap          # same fractional position in the template curve
+    new_ah_rel = frac * target_total_cap
+
+    # SOH-driven aging (internal resistance growth) sags voltage roughly
+    # persistently across the WHOLE discharge, not just a transient that
+    # fades after the first few % of capacity (that decaying-transient shape
+    # belongs to curve_train.py's C-rate initial-drop model, a different
+    # physical effect). extract_features_from_slice computes its features
+    # from 40-70% into the curve, so the sag needs to still be present there;
+    # present from the start and growing toward the knee mirrors how a more
+    # degraded pack's curve actually sits below a healthier one throughout.
+    extra_degradation = template_soh - target_soh   # negative => synthesizing a healthier curve
+    sag_amplitude = EXTRA_IR_DROP_PER_SOH_POINT[c_rate_name] * extra_degradation
+    sag = sag_amplitude * (0.4 + 0.6 * frac)
+
+    data = {}
+    for col in cell_cols:
+        v_new = np.interp(src_ah, ah_rel, df[col].values) - sag
+        v_new = v_new + np.random.normal(0, 0.004, new_rows)
+        data[col] = v_new
+    for col in temp_cols:
+        data[col] = np.interp(src_ah, ah_rel, df[col].values)
+
+    data['AHDischarge'] = ah0 + new_ah_rel
+    return pd.DataFrame(data)
+
+
 def get_soh_for_pack_and_crate(pack_id, c_rate):
     """Get the correct SOH value for a specific pack and C-rate."""
     if pack_id not in SOH_GROUND_TRUTH:
@@ -89,16 +158,18 @@ def extract_features_from_slice(df, start_row):
         
     return features
 
+
 def build_dataset(data_folder, target_c_rate=None):
     """
     Builds dataset with correct C-rate specific SOH labels.
     If target_c_rate is provided, filters for it (e.g., 0.3 or 1.0).
     """
     real_data = []
-    
+    synth_done_for = set()  # (pack_id, c_rate_name) already used as a synthetic template
+
     for file in os.listdir(data_folder):
         if not file.endswith('.csv'): continue
-        
+
         pack_match = re.search(r'(pk\d+)', file)
         pack_id = pack_match.group(1) if pack_match else 'unknown'
         if pack_id not in SOH_GROUND_TRUTH: continue
@@ -136,7 +207,37 @@ def build_dataset(data_folder, target_c_rate=None):
                 feats['pack_id'] = pack_id
                 feats['slice_start_pct'] = pct
                 real_data.append(feats)
-                
+
+        # Physics-informed synthetic augmentation: only full curves (FFCT/FFT)
+        # are valid templates to resample from. Grouped under the SAME pack_id
+        # so LOPO still holds out a pack's synthetic derivatives along with
+        # its real data -- this adds density across the 80-100% SOH range,
+        # it never lets a held-out pack "leak" information about itself.
+        # Generated only ONCE per (pack, C-rate) -- raw_dataset has 2-3
+        # duplicate exports of the same test, and using each as a separate
+        # template would multiply the synthetic:real ratio for whichever pack
+        # happens to have the most duplicate exports.
+        is_full_curve = 'FFCT' in file.upper() or 'FFT' in file.upper()
+        c_rate_name = '0.3C' if abs(c_rate - 0.3) < 0.05 else '1.0C'
+        if is_full_curve and (pack_id, c_rate_name) not in synth_done_for:
+            synth_done_for.add((pack_id, c_rate_name))
+            for _ in range(SYNTH_SAMPLES_PER_TEMPLATE):
+                target_soh = float(np.random.uniform(SYNTHETIC_SOH_FLOOR, SYNTHETIC_SOH_CEILING))
+                df_synth = generate_synthetic_soh_dataframe(df, true_soh, target_soh, c_rate_name)
+                if df_synth is None:
+                    continue
+                synth_total_rows = len(df_synth)
+                for pct in [0.40, 0.50, 0.60, 0.70]:
+                    start_row = int(synth_total_rows * pct)
+                    feats = extract_features_from_slice(df_synth, start_row)
+                    if feats:
+                        feats['c_rate'] = c_rate
+                        feats['is_sfct'] = is_sfct
+                        feats['true_soh'] = target_soh
+                        feats['pack_id'] = pack_id
+                        feats['slice_start_pct'] = pct
+                        real_data.append(feats)
+
     return pd.DataFrame(real_data)
 
 def train_separate_models(data_folder):

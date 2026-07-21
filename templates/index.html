@@ -249,14 +249,17 @@
                 <h3>Capacity at <span id="cutoffLabel">3.2V</span></h3>
                 <p class="value" id="cutoffCapValue">-- Ah</p>
             </div>
+            <!--
             <div class="metric-card">
                 <h3>Reconstruction MAE</h3>
                 <p class="value" id="maeValue">-- mV</p>
             </div>
+            -->
             <div class="metric-card knee">
                 <h3>Predicted Knee Point</h3>
                 <p class="value" id="predKneeValue">-- Ah</p>
             </div>
+            <!--
             <div class="metric-card knee">
                 <h3>Actual Knee Point</h3>
                 <p class="value" id="actualKneeValue">-- Ah</p>
@@ -265,6 +268,7 @@
                 <h3>Knee Location Error</h3>
                 <p class="value" id="kneeErrorValue">-- Ah</p>
             </div>
+            -->
         </div>
 
         <div class="plot-section" id="plotSection">
@@ -318,10 +322,10 @@
                     document.getElementById('actualSohValue').innerText = data.actual_soh + "%";
                     document.getElementById('cutoffCapValue').innerText = data.cutoff_capacity + " Ah";
                     document.getElementById('cutoffLabel').innerText = voltageCutoff + "V";
-                    document.getElementById('maeValue').innerText = data.mae + " mV";
+                    // document.getElementById('maeValue').innerText = data.mae + " mV";
                     document.getElementById('predKneeValue').innerText = data.pred_knee_ah !== null ? (data.pred_knee_ah + " Ah") : "N/A";
-                    document.getElementById('actualKneeValue').innerText = data.actual_knee_ah !== null ? (data.actual_knee_ah + " Ah") : "N/A";
-                    document.getElementById('kneeErrorValue').innerText = data.knee_error_ah !== null ? (data.knee_error_ah + " Ah") : "N/A";
+                    // document.getElementById('actualKneeValue').innerText = data.actual_knee_ah !== null ? (data.actual_knee_ah + " Ah") : "N/A";
+                    // document.getElementById('kneeErrorValue').innerText = data.knee_error_ah !== null ? (data.knee_error_ah + " Ah") : "N/A";
 
                     // Update Plot
                     document.getElementById('plotImage').src = "data:image/png;base64," + data.plot;

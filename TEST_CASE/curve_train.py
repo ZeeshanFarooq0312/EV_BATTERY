@@ -52,7 +52,22 @@ SFT_SAMPLE_FRACTIONS = [
     0.7541, 0.767, 0.78, 0.7929, 0.8059, 0.8188, 0.8318, 0.8447, 0.8576, 0.8706, 0.8835, 0.8965, 0.9094, 0.9223, 0.9353,
     0.9482, 0.9612, 0.9741, 0.9871, 1.0
 ]
-CUTOFF_PCTS = [0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75]
+# Real 0.3C/1.0C packs show the discharge knee at ~83-92% of total capacity.
+# The original cutoffs (0.20-0.75) always land BEFORE the knee, so the model
+# always sees "knee + everything after it" bundled together in the observed
+# tail -- it never gets a training row that isolates just the post-knee decay
+# the way a short field test that starts late-in-life actually would. Adding
+# cutoffs from 0.78 up to 0.90 forces some training rows to start the
+# observed segment in/after the knee, giving the model dedicated signal on
+# reconstructing the post-knee tail from very little pre-knee context.
+CUTOFF_PCTS = [
+    0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75,
+    0.78, 0.80, 0.825, 0.85, 0.875, 0.90
+]
+
+# When cutting a synthetic curve's post-knee decay, how much steeper/shallower
+# to make it vs. the template it's derived from (see generate_synthetic_curve).
+POST_KNEE_DECAY_JITTER = (0.7, 1.5)
 
 
 def extract_and_resample_curve(file_path):
@@ -126,6 +141,27 @@ def extract_enhanced_features(sft_v, sft_ah, cell_data=None):
     return features
 
 
+def detect_knee_index(ah, v, search_start_pct=0.5, search_end_pct=0.99):
+    """Chord-distance elbow detection (same method used by app.py at inference
+    time): the point in the search window with maximum perpendicular distance
+    from the straight line joining the window's endpoints."""
+    total = ah[-1]
+    mask = (ah >= search_start_pct * total) & (ah <= search_end_pct * total)
+    idx = np.where(mask)[0]
+    if len(idx) < 3:
+        return len(ah) - 1
+
+    ah_w, v_w = ah[idx], v[idx]
+    ah_n = (ah_w - ah_w[0]) / (ah_w[-1] - ah_w[0] + 1e-9)
+    v_n = (v_w - v_w[0]) / (v_w[-1] - v_w[0] + 1e-9)
+    x1, y1 = ah_n[0], v_n[0]
+    x2, y2 = ah_n[-1], v_n[-1]
+    num = np.abs((y2 - y1) * ah_n - (x2 - x1) * v_n + x2 * y1 - y2 * x1)
+    den = np.sqrt((y2 - y1) ** 2 + (x2 - x1) ** 2) + 1e-9
+    dist = num / den
+    return int(idx[np.argmax(dist)])
+
+
 def generate_synthetic_curve(template_ah, template_v, template_cell_std, template_soh, c_rate_name):
     """Scale a real curve to a new (lower) SOH and add a C-rate specific extra
     IR sag for the portion of degradation beyond what the template itself shows.
@@ -144,6 +180,17 @@ def generate_synthetic_curve(template_ah, template_v, template_cell_std, templat
         decay_window = IR_DROP_DECAY_FRACTION * target_total_cap
         sag = sag_amplitude * np.exp(-synth_ah / (decay_window + 1e-6))
         synth_v = synth_v - sag
+
+    # Vary the steepness of the post-knee voltage collapse itself, so the
+    # model sees a family of end-of-discharge drop-off shapes rather than
+    # only ever the one recorded shape from whichever real curve was used as
+    # the template -- real data has very few genuinely independent examples
+    # of this region.
+    knee_idx = detect_knee_index(synth_ah, synth_v)
+    if knee_idx < len(synth_v) - 3:
+        decay_factor = float(np.random.uniform(*POST_KNEE_DECAY_JITTER))
+        knee_v = synth_v[knee_idx]
+        synth_v[knee_idx:] = knee_v - (knee_v - synth_v[knee_idx:]) * decay_factor
 
     noise = np.random.normal(0, 0.004, synth_v.shape)
     synth_v = np.clip(synth_v + noise, 2.0, 4.2)

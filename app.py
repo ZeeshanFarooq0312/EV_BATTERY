@@ -37,8 +37,8 @@ soh_feature_names = {}
 for c_rate in [0.3, 1.0]:
     c_str = str(c_rate).replace('.', '_')
     try:
-        soh_models[c_rate] = joblib.load(os.path.join(APP_DIR, f'soh_model_{c_str}c.pkl'))
-        soh_feature_names[c_rate] = joblib.load(os.path.join(APP_DIR, f'feature_names_{c_str}c.pkl'))
+        soh_models[c_rate] = joblib.load(os.path.join(TEST_CASE_DIR, f'soh_model_{c_str}c.pkl'))
+        soh_feature_names[c_rate] = joblib.load(os.path.join(TEST_CASE_DIR, f'feature_names_{c_str}c.pkl'))
         print(f"✅ SOH model for {c_rate}C loaded")
     except Exception as e:
         print(f"❌ Error loading SOH model for {c_rate}C: {e}")
@@ -212,16 +212,26 @@ def detect_knee(ah, v, search_start_pct=0.5, search_end_pct=0.99):
     return float(ah[knee_idx]), float(v[knee_idx])
 
 
-def reconstruct_full_curve(sft_df, pred_capacity, c_rate=0.3):
+def reconstruct_full_curve(sft_df, pred_capacity, c_rate=0.3, actual_capacity=None):
     """The v10 model predicts all checkpoints across the COMPLETE global curve
-    (0-100% of pred_capacity) directly from the observed SFT tail segment -- no
-    splicing/blending needed. Checkpoints and SFT sampling are both non-uniform
-    (dense near 72-100%) to better resolve the discharge knee."""
+    (0-100% of the curve's total capacity) directly from the observed SFT tail
+    segment -- no splicing/blending needed. Checkpoints and SFT sampling are
+    both non-uniform (dense near 72-100%) to better resolve the discharge knee.
+
+    `pred_capacity` is Part 1's own SOH-model output and is always reported as
+    its own metric. `actual_capacity` (the real FFT ground truth, when a
+    comparison file is uploaded) is used instead to anchor the checkpoint Ah
+    positions and the estimated-SOH feature, matching exactly what the model
+    saw during training (real curves, real capacity) and keeping a Part-1 SOH
+    miss from stretching/shifting the whole reconstructed curve on the plot.
+    Falls back to pred_capacity when no ground truth is available."""
+    anchor_capacity = actual_capacity if actual_capacity is not None else pred_capacity
+
     sft_ah, sft_v, sft_cell_std = extract_and_resample_curve(sft_df)
     sft_delta_ah = sft_ah[-1]
-    cutoff_ah = pred_capacity - sft_delta_ah
+    cutoff_ah = anchor_capacity - sft_delta_ah
 
-    estimated_soh = compute_soh(pred_capacity)
+    estimated_soh = compute_soh(anchor_capacity)
     sft_sampled_v = [np.interp(frac * sft_ah[-1], sft_ah, sft_v) for frac in SFT_SAMPLE_FRACTIONS]
     feats = extract_enhanced_features(sft_v, sft_ah, sft_cell_std)
 
@@ -243,7 +253,7 @@ def reconstruct_full_curve(sft_df, pred_capacity, c_rate=0.3):
         raise ValueError("No reconstruction model available")
 
     pred_v = model.predict(np.array([features]))[0]
-    recon_ah = np.array([pct * pred_capacity for pct in HEAD_CHECKPOINTS_PCT])
+    recon_ah = np.array([pct * anchor_capacity for pct in HEAD_CHECKPOINTS_PCT])
 
     dense_ah = np.linspace(recon_ah.min(), recon_ah.max(), 300)
     interp_func = interp1d(recon_ah, pred_v, kind='cubic', fill_value='extrapolate')
@@ -280,18 +290,18 @@ def analyze():
         c_rate = float(c_rate_match.group(1)) if c_rate_match else 0.3
         if abs(c_rate - 0.95) < 0.05:
             c_rate = 1.0
-            
+
         print(f"Detected C-rate: {c_rate}")
 
         print("Extracting SOH features...")
         soh_feats = extract_soh_features(sft_df, c_rate)
-        
+
         if c_rate not in soh_models:
             return jsonify({'error': f'No SOH model available for {c_rate}C'}), 400
-            
+
         model = soh_models[c_rate]
         feats = soh_feature_names[c_rate]
-        
+
         X_soh = pd.DataFrame([soh_feats]).reindex(columns=feats, fill_value=0)
         
         print("Predicting SOH...")
@@ -309,7 +319,7 @@ def analyze():
         print(f"Found {len(fft_ah)} FFT points. Actual Capacity: {actual_capacity:.2f} Ah, Actual SOH: {actual_soh:.2f}%")
 
         print("Reconstructing complete global curve from SFT...")
-        recon_ah, recon_v, cutoff_ah = reconstruct_full_curve(sft_df, pred_capacity, c_rate)
+        recon_ah, recon_v, cutoff_ah = reconstruct_full_curve(sft_df, pred_capacity, c_rate, actual_capacity=actual_capacity)
         print(f"Reconstruction complete. SFT tail starts at {cutoff_ah:.2f} Ah of the reconstructed curve.")
 
         cutoff_idx = np.where(recon_v <= voltage_cutoff)[0]
@@ -398,6 +408,7 @@ def analyze():
         print(f"❌ Error in analyze endpoint: {str(e)}")
         print(traceback.format_exc())
         return jsonify({'error': f'Server error: {str(e)}'}), 500
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', debug=True, port=5000)
