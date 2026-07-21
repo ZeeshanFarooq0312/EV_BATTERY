@@ -366,9 +366,9 @@ def analyze():
                        color='#f59e0b', s=150, zorder=5, label=f'{voltage_cutoff}V Cutoff',
                        marker='o', edgecolors='white', linewidths=2)
 
-        if actual_knee_ah is not None:
-            plt.scatter([actual_knee_ah], [actual_knee_v], color='#2563eb', s=220, zorder=6,
-                       label=f'Actual Knee ({actual_knee_ah:.2f} Ah)', marker='*', edgecolors='white', linewidths=1.5)
+        # if actual_knee_ah is not None:
+        #     plt.scatter([actual_knee_ah], [actual_knee_v], color='#2563eb', s=220, zorder=6,
+        #                label=f'Actual Knee ({actual_knee_ah:.2f} Ah)', marker='*', edgecolors='white', linewidths=1.5)
         if pred_knee_ah is not None:
             plt.scatter([pred_knee_ah], [pred_knee_v], color='#dc2626', s=220, zorder=6,
                        label=f'Predicted Knee ({pred_knee_ah:.2f} Ah)', marker='*', edgecolors='white', linewidths=1.5)
