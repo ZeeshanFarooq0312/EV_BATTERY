@@ -197,6 +197,110 @@
         }
 
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        .module-section {
+            background-color: var(--card-bg);
+            padding: 20px 24px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            margin-bottom: 30px;
+            display: none;
+        }
+
+        .module-section h2 { margin-top: 0; }
+
+        .module-legend {
+            display: flex;
+            gap: 24px;
+            margin-bottom: 16px;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .module-legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .module-legend-swatch {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+            display: inline-block;
+        }
+
+        .module-row {
+            display: grid;
+            grid-template-columns: 130px 1fr 1fr;
+            gap: 16px;
+            align-items: center;
+            padding: 8px 10px;
+            border-radius: 8px;
+            margin-bottom: 4px;
+        }
+
+        .module-row.weakest {
+            background-color: rgba(239, 68, 68, 0.12);
+            border: 1px solid var(--danger);
+        }
+
+        .module-label {
+            font-size: 0.9rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .module-bar-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .module-bar-track {
+            flex: 1;
+            height: 10px;
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .module-bar-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.4s ease;
+        }
+
+        .module-bar-value {
+            font-size: 0.8rem;
+            width: 58px;
+            text-align: right;
+            color: var(--text-main);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .module-weakest-badge {
+            font-size: 0.65rem;
+            background-color: var(--danger);
+            color: white;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+
+        .module-weakest-badge.predicted {
+            background-color: var(--warning);
+        }
+
+        .module-error-msg {
+            color: var(--warning);
+            font-size: 0.9rem;
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -232,6 +336,7 @@
             <div class="metric-card">
                 <h3>Predicted SOH</h3>
                 <p class="value" id="sohValue">--%</p>
+                <p style="font-size: 0.7rem; color: var(--text-muted); margin: 4px 0 0 0;" id="sohSourceLabel"></p>
             </div>
             <div class="metric-card">
                 <h3>Predicted Capacity</h3>
@@ -279,9 +384,84 @@
             </p>
             <img id="plotImage" src="" alt="Complete Global Curve Reconstruction Plot">
         </div>
+
+        <div class="module-section" id="moduleSection">
+            <h2>Per-Module Analysis</h2>
+            <p style="color: var(--text-muted); margin-top: -10px; margin-bottom: 15px;">
+                Splits the pack's 108 cells into its 9 modules (12 cells each). "Predicted" comes from the
+                uploaded SFT file via the module SOH model; "Actual" is measured or estimated directly from
+                the uploaded FFT file's full discharge curve. Hover a bar for the exact value.
+            </p>
+            <div class="module-legend">
+                <div class="module-legend-item"><span class="module-legend-swatch" style="background:#2563eb;"></span>Actual (from FFT)</div>
+                <div class="module-legend-item"><span class="module-legend-swatch" style="background:#dc2626;"></span>Predicted (from SFT)</div>
+            </div>
+            <div id="moduleRows"></div>
+            <p class="module-error-msg" id="moduleErrorMsg"></p>
+        </div>
     </div>
 
     <script>
+        function renderModules(data) {
+            const section = document.getElementById('moduleSection');
+            const rowsContainer = document.getElementById('moduleRows');
+            const errMsg = document.getElementById('moduleErrorMsg');
+            rowsContainer.innerHTML = '';
+            section.style.display = "block";
+
+            if (data.module_error || !data.modules) {
+                errMsg.innerText = data.module_error || "Per-module analysis unavailable.";
+                errMsg.style.display = 'block';
+                return;
+            }
+            errMsg.style.display = 'none';
+
+            const modules = data.modules;
+            const allValues = [];
+            modules.forEach(m => {
+                if (m.actual_soh !== null) allValues.push(m.actual_soh);
+                if (m.predicted_soh !== null) allValues.push(m.predicted_soh);
+            });
+            const domainMax = 100;
+            const domainMin = allValues.length ? Math.max(0, Math.floor(Math.min(...allValues)) - 3) : 0;
+            const span = Math.max(domainMax - domainMin, 1);
+
+            modules.forEach(m => {
+                const row = document.createElement('div');
+                row.className = 'module-row';
+                const isWeakestActual = m.module_idx === data.weakest_module_actual;
+                const isWeakestPred = m.module_idx === data.weakest_module_predicted;
+                if (isWeakestActual) row.classList.add('weakest');
+
+                const actualPct = m.actual_soh !== null ? Math.max(0, (m.actual_soh - domainMin) / span * 100) : 0;
+                const predPct = m.predicted_soh !== null ? Math.max(0, (m.predicted_soh - domainMin) / span * 100) : 0;
+                const actualTitle = m.actual_soh !== null
+                    ? `Actual SOH: ${m.actual_soh}% (${m.label_source || 'n/a'})` : 'Actual SOH: n/a';
+                const predTitle = m.predicted_soh !== null ? `Predicted SOH: ${m.predicted_soh}%` : 'Predicted SOH: n/a';
+
+                let badges = '';
+                if (isWeakestActual) badges += '<span class="module-weakest-badge">WEAKEST</span>';
+                if (isWeakestPred && !isWeakestActual) badges += '<span class="module-weakest-badge predicted">PRED. WEAKEST</span>';
+
+                row.innerHTML = `
+                    <div class="module-label">Module ${m.module_idx}${badges}</div>
+                    <div class="module-bar-group">
+                        <div class="module-bar-track" title="${actualTitle}">
+                            <div class="module-bar-fill" style="width:${actualPct}%; background-color:#2563eb;"></div>
+                        </div>
+                        <div class="module-bar-value">${m.actual_soh !== null ? m.actual_soh.toFixed(2) + '%' : '--'}</div>
+                    </div>
+                    <div class="module-bar-group">
+                        <div class="module-bar-track" title="${predTitle}">
+                            <div class="module-bar-fill" style="width:${predPct}%; background-color:#dc2626;"></div>
+                        </div>
+                        <div class="module-bar-value">${m.predicted_soh !== null ? m.predicted_soh.toFixed(2) + '%' : '--'}</div>
+                    </div>
+                `;
+                rowsContainer.appendChild(row);
+            });
+        }
+
         async function analyzeBattery() {
             const sftFile = document.getElementById('sft_file').files[0];
             const fftFile = document.getElementById('fft_file').files[0];
@@ -300,6 +480,7 @@
             loader.style.display = "block";
             document.getElementById('metricsGrid').style.display = "none";
             document.getElementById('plotSection').style.display = "none";
+            document.getElementById('moduleSection').style.display = "none";
 
             const formData = new FormData();
             formData.append('sft_file', sftFile);
@@ -317,6 +498,10 @@
                 if (response.ok) {
                     // Update Metrics
                     document.getElementById('sohValue').innerText = data.soh + "%";
+                    document.getElementById('sohSourceLabel').innerText =
+                        data.soh_source === 'module_derived' ? 'via per-module analysis (weakest module)'
+                        : data.soh_source === 'legacy_pack_model' ? 'via legacy pack-level model (fallback)'
+                        : '';
                     document.getElementById('capValue').innerText = data.capacity + " Ah";
                     document.getElementById('actualCapValue').innerText = data.actual_capacity + " Ah";
                     document.getElementById('actualSohValue').innerText = data.actual_soh + "%";
@@ -329,6 +514,8 @@
 
                     // Update Plot
                     document.getElementById('plotImage').src = "data:image/png;base64," + data.plot;
+
+                    renderModules(data);
 
                     // Show Results
                     document.getElementById('metricsGrid').style.display = "grid";

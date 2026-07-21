@@ -1,5 +1,6 @@
 
 import os
+import sys
 import io
 import base64
 import joblib
@@ -25,6 +26,15 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 TEST_CASE_DIR = os.path.join(APP_DIR, 'TEST_CASE')
+sys.path.insert(0, TEST_CASE_DIR)
+
+from curve_utils import (
+    NOMINAL_CAPACITY, HEAD_CHECKPOINTS_PCT, SFT_SAMPLE_FRACTIONS,
+    compute_soh, extract_and_resample_curve, extract_enhanced_features,
+    detect_knee, get_cell_columns, module_cell_columns, N_MODULES,
+    extract_module_features_from_slice, add_sibling_features,
+)
+from module_capacity_extrapolation import find_crossing_index, estimate_module_capacity, _interp_crossing_ah
 
 # ==========================================
 # LOAD MODELS AT STARTUP
@@ -58,48 +68,23 @@ except Exception as e:
     print(f"⚠️ 1.0C reconstruction model not found: {e}")
     recon_model_1_0c = None
 
-print("✅ Startup complete!\n")
+# 3. Load per-module SOH models
+module_soh_models = {}
+module_soh_feature_names = {}
+for c_rate in [0.3, 1.0]:
+    c_str = str(c_rate).replace('.', '_')
+    try:
+        module_soh_models[c_rate] = joblib.load(os.path.join(TEST_CASE_DIR, f'module_soh_model_{c_str}c.pkl'))
+        module_soh_feature_names[c_rate] = joblib.load(os.path.join(TEST_CASE_DIR, f'module_feature_names_{c_str}c.pkl'))
+        print(f"✅ Module SOH model for {c_rate}C loaded")
+    except Exception as e:
+        print(f"⚠️ Module SOH model for {c_rate}C not found: {e}")
 
-# ==========================================
-# CONSTANTS
-# ==========================================
-NOMINAL_CAPACITY = 156.0
-# Non-uniform, knee-dense checkpoint grid -- must match curve_train.py exactly (positional).
-HEAD_CHECKPOINTS_PCT = [
-    0.0, 0.0125, 0.025, 0.0375, 0.05, 0.0625, 0.075, 0.0875, 0.1, 0.125, 0.15, 0.175, 0.2, 0.225, 0.25, 0.275, 0.3, 0.325,
-    0.35, 0.375, 0.4, 0.425, 0.45, 0.475, 0.5, 0.525, 0.55, 0.575, 0.6, 0.625, 0.65, 0.675, 0.7, 0.7125, 0.725, 0.7375,
-    0.75, 0.7625, 0.775, 0.7875, 0.8, 0.8125, 0.825, 0.8375, 0.85, 0.8625, 0.875, 0.8875, 0.9, 0.9125, 0.925, 0.9375,
-    0.95, 0.9625, 0.975, 0.9875, 1.0
-]
-SFT_SAMPLE_FRACTIONS = [
-    0.0, 0.026, 0.052, 0.078, 0.104, 0.13, 0.156, 0.182, 0.208, 0.234, 0.26, 0.286, 0.312, 0.338, 0.364, 0.39, 0.416,
-    0.442, 0.468, 0.494, 0.52, 0.546, 0.572, 0.598, 0.624, 0.65, 0.6635, 0.6764, 0.6894, 0.7023, 0.7153, 0.7282, 0.7412,
-    0.7541, 0.767, 0.78, 0.7929, 0.8059, 0.8188, 0.8318, 0.8447, 0.8576, 0.8706, 0.8835, 0.8965, 0.9094, 0.9223, 0.9353,
-    0.9482, 0.9612, 0.9741, 0.9871, 1.0
-]
+print("✅ Startup complete!\n")
 
 # ==========================================
 # CORE LOGIC FUNCTIONS
 # ==========================================
-def extract_and_resample_curve(df):
-    """Filters to the valid discharge window and re-zeros Ah. Shared by both the
-    uploaded SFT and FFT curves so features/targets line up with training."""
-    cell_cols = [c for c in df.columns if 'Cell' in c and 'Temperature' not in c]
-    df['Mean_Cell_Voltage'] = df[cell_cols].mean(axis=1)
-    mask = (df['Mean_Cell_Voltage'] < 4.15) & (df['Mean_Cell_Voltage'] > 2.0)
-    discharge_df = df[mask].copy()
-    discharge_df = discharge_df.sort_values('AHDischarge')
-    discharge_df['Ah_Relative'] = discharge_df['AHDischarge'] - discharge_df['AHDischarge'].iloc[0]
-
-    ah = discharge_df['Ah_Relative'].values
-    v = discharge_df['Mean_Cell_Voltage'].values
-    cell_std = df[cell_cols].std(axis=1)[mask].values if len(cell_cols) > 0 else None
-    return ah, v, cell_std
-
-
-def compute_soh(total_capacity_ah):
-    return float((total_capacity_ah / NOMINAL_CAPACITY) * 100.0)
-
 def extract_soh_features(df, c_rate):
     features = {}
     cell_cols = [c for c in df.columns if 'Cell' in c and 'Temperature' not in c]
@@ -151,67 +136,6 @@ def extract_soh_features(df, c_rate):
     
     return features
 
-def extract_enhanced_features(sft_v, sft_ah, cell_data=None):
-    features = {}
-    dv_dah = np.gradient(sft_v, sft_ah)
-    d2v_dah2 = np.gradient(dv_dah, sft_ah)
-    
-    mid_idx = len(sft_v) // 2
-    features['initial_slope'] = float((sft_v[mid_idx] - sft_v[0]) / (sft_ah[mid_idx] - sft_ah[0] + 1e-5))
-    features['final_slope'] = float((sft_v[-1] - sft_v[mid_idx]) / (sft_ah[-1] - sft_ah[mid_idx] + 1e-5))
-    features['overall_slope'] = float((sft_v[-1] - sft_v[0]) / (sft_ah[-1] - sft_ah[0] + 1e-5))
-    
-    features['mean_curvature'] = float(np.mean(np.abs(d2v_dah2)))
-    features['max_curvature'] = float(np.max(np.abs(d2v_dah2)))
-    features['voltage_std'] = float(np.std(sft_v))
-    features['voltage_range'] = float(sft_v[0] - sft_v[-1])
-    
-    plateau_mask = (sft_v > 3.4) & (sft_v < 3.7)
-    features['plateau_length'] = float(np.sum(plateau_mask) / len(sft_v))
-    
-    end_idx = int(len(sft_v) * 0.8)
-    features['end_slope'] = float((sft_v[-1] - sft_v[end_idx]) / (sft_ah[-1] - sft_ah[end_idx] + 1e-5))
-    features['end_voltage_drop'] = float(sft_v[end_idx] - sft_v[-1])
-    
-    if cell_data is not None and len(cell_data) > 0:
-        features['cell_imbalance_mean'] = float(np.mean(cell_data))
-        features['cell_imbalance_std'] = float(np.std(cell_data))
-    else:
-        features['cell_imbalance_mean'] = 0.0
-        features['cell_imbalance_std'] = 0.0
-
-    knee_idx = int(np.argmax(np.abs(dv_dah)))
-    features['tail_knee_pct'] = float(sft_ah[knee_idx] / (sft_ah[-1] + 1e-5))
-    features['tail_knee_slope'] = float(dv_dah[knee_idx])
-
-    return features
-
-def detect_knee(ah, v, search_start_pct=0.5, search_end_pct=0.99):
-    """Finds the sharpest bend (max perpendicular distance from the chord
-    connecting the search window's endpoints) in the tail of a discharge
-    curve -- the discharge knee. Same method used to measure real knee
-    locations (0.3C/1.0C packs show it at ~83-92% of total capacity)."""
-    total = ah[-1]
-    mask = (ah >= search_start_pct * total) & (ah <= search_end_pct * total)
-    idx = np.where(mask)[0]
-    if len(idx) < 3:
-        return None, None
-
-    ah_w, v_w = ah[idx], v[idx]
-    ah_n = (ah_w - ah_w[0]) / (ah_w[-1] - ah_w[0] + 1e-9)
-    v_n = (v_w - v_w[0]) / (v_w[-1] - v_w[0] + 1e-9)
-
-    x1, y1 = ah_n[0], v_n[0]
-    x2, y2 = ah_n[-1], v_n[-1]
-    num = np.abs((y2 - y1) * ah_n - (x2 - x1) * v_n + x2 * y1 - y2 * x1)
-    den = np.sqrt((y2 - y1) ** 2 + (x2 - x1) ** 2) + 1e-9
-    dist = num / den
-
-    knee_local_idx = int(np.argmax(dist))
-    knee_idx = idx[knee_local_idx]
-    return float(ah[knee_idx]), float(v[knee_idx])
-
-
 def reconstruct_full_curve(sft_df, pred_capacity, c_rate=0.3, actual_capacity=None):
     """The v10 model predicts all checkpoints across the COMPLETE global curve
     (0-100% of the curve's total capacity) directly from the observed SFT tail
@@ -261,6 +185,81 @@ def reconstruct_full_curve(sft_df, pred_capacity, c_rate=0.3, actual_capacity=No
 
     return dense_ah, dense_v, cutoff_ah
 
+
+def analyze_modules(sft_df, fft_df, c_rate):
+    """Per-module SOH: predicted from the uploaded (partial) SFT file via the
+    module SOH model, and actual/ground-truth from the uploaded (full) FFT
+    file via the same tiered capacity extrapolation used to build the
+    training labels (see build_module_dataset.py) -- since the FFT file is a
+    full curve, most modules resolve to a real measured or self-extrapolated
+    value, only rarely needing the cross-module shape-transfer fallback.
+    Returns (result_dict, error_message) -- exactly one is None."""
+    c_bucket = 1.0 if c_rate >= 0.9 else 0.3
+    if c_bucket not in module_soh_models:
+        return None, f"No module SOH model available for {c_bucket}C"
+
+    sft_cell_cols = get_cell_columns(sft_df)
+    pred_feats_by_module = {}
+    for m in range(1, N_MODULES + 1):
+        f = extract_module_features_from_slice(sft_df, module_cell_columns(sft_cell_cols, m))
+        if f is not None:
+            pred_feats_by_module[m] = f
+    if len(pred_feats_by_module) < N_MODULES:
+        return None, "SFT file too short to extract all 9 modules' features"
+
+    add_sibling_features(pred_feats_by_module)
+    model = module_soh_models[c_bucket]
+    feature_names = module_soh_feature_names[c_bucket]
+
+    predicted = {}
+    for m, f in pred_feats_by_module.items():
+        row = dict(f)
+        row['c_rate'] = c_rate
+        row['is_sfct'] = 1.0
+        row['slice_start_pct'] = 0.0
+        row['voltage_drop_norm'] = row['voltage_drop'] / (c_rate + 1e-5)
+        row['delta_Ah_norm'] = row['delta_Ah'] / (c_rate + 1e-5)
+        X = pd.DataFrame([row]).reindex(columns=feature_names, fill_value=0)
+        predicted[m] = float(model.predict(X)[0])
+
+    fft_cell_cols = get_cell_columns(fft_df)
+    ah, pack_v, cell_std, modules = extract_and_resample_curve(fft_df, want_modules=True)
+    cutoff_v = float(fft_df[fft_cell_cols].min(axis=1).iloc[-1])
+
+    tier0 = {}
+    for m, traces in modules.items():
+        idx = find_crossing_index(ah, traces['min_v'], cutoff_v)
+        if idx is not None:
+            tier0[m] = _interp_crossing_ah(ah, traces['min_v'], idx, cutoff_v)
+
+    actual, label_source = {}, {}
+    if tier0:
+        weakest_module = min(tier0, key=tier0.get)
+        template_v = modules[weakest_module]['min_v']
+        for m, traces in modules.items():
+            if m in tier0:
+                capacity_ah, source = tier0[m], 'measured'
+            else:
+                capacity_ah, source, _diag = estimate_module_capacity(
+                    ah, traces['min_v'], cutoff_v, template_ah=ah, template_v=template_v,
+                )
+            actual[m] = compute_soh(capacity_ah)
+            label_source[m] = source
+
+    modules_result = [{
+        'module_idx': m,
+        'predicted_soh': round(predicted[m], 2) if m in predicted else None,
+        'actual_soh': round(actual[m], 2) if m in actual else None,
+        'label_source': label_source.get(m),
+    } for m in range(1, N_MODULES + 1)]
+
+    return {
+        'modules': modules_result,
+        'weakest_module_predicted': min(predicted, key=predicted.get) if predicted else None,
+        'weakest_module_actual': min(actual, key=actual.get) if actual else None,
+    }, None
+
+
 # ==========================================
 # FLASK ROUTES
 # ==========================================
@@ -293,24 +292,50 @@ def analyze():
 
         print(f"Detected C-rate: {c_rate}")
 
-        print("Extracting SOH features...")
-        soh_feats = extract_soh_features(sft_df, c_rate)
+        print("Analyzing per-module SOH...")
+        module_result, module_error = None, None
+        try:
+            module_result, module_error = analyze_modules(sft_df, fft_df, c_rate)
+            if module_error:
+                print(f"⚠️ Module analysis skipped: {module_error}")
+            else:
+                print(f"   Weakest module (predicted): {module_result['weakest_module_predicted']}  "
+                      f"(actual): {module_result['weakest_module_actual']}")
+        except Exception as e:
+            module_error = str(e)
+            print(f"⚠️ Module analysis failed: {module_error}")
+            print(traceback.format_exc())
 
-        if c_rate not in soh_models:
-            return jsonify({'error': f'No SOH model available for {c_rate}C'}), 400
+        # Headline "Predicted SOH" is derived from the per-module model: in a
+        # series string, pack capacity is set by its weakest module, so the
+        # weakest module's own predicted SOH IS the pack's predicted SOH --
+        # not an aggregate/average. This replaces the old pack-level
+        # soh_model_*.pkl (trained by SOH_MODELS_TRAIN.PY against a hardcoded
+        # SOH_GROUND_TRUTH table covering only pk1-pk5) as the primary
+        # source, since that table's blind spot for any other pack (e.g.
+        # pk6) made it extrapolate badly -- a real ~10-point miss observed in
+        # production. The legacy pack-level model is kept ONLY as a fallback
+        # for when module analysis itself isn't available (e.g. the uploaded
+        # SFT file is too short to extract all 9 modules' features).
+        if module_result is not None:
+            module_predicted_sohs = {m['module_idx']: m['predicted_soh'] for m in module_result['modules']}
+            pred_soh = min(module_predicted_sohs.values())
+            pred_soh_source = 'module_derived'
+        else:
+            print("   Module analysis unavailable -- falling back to legacy pack-level model")
+            soh_feats = extract_soh_features(sft_df, c_rate)
+            if c_rate not in soh_models:
+                return jsonify({'error': f'No SOH model available for {c_rate}C'}), 400
+            legacy_model = soh_models[c_rate]
+            legacy_feats = soh_feature_names[c_rate]
+            X_soh = pd.DataFrame([soh_feats]).reindex(columns=legacy_feats, fill_value=0)
+            pred_soh = float(legacy_model.predict(X_soh)[0])
+            pred_soh_source = 'legacy_pack_model'
 
-        model = soh_models[c_rate]
-        feats = soh_feature_names[c_rate]
-
-        X_soh = pd.DataFrame([soh_feats]).reindex(columns=feats, fill_value=0)
-        
-        print("Predicting SOH...")
-        pred_soh = float(model.predict(X_soh)[0])
-        
         # CRITICAL FIX: Convert SOH to whole number for clean capacity calculation
         soh_whole_number = int(pred_soh)
         pred_capacity = (soh_whole_number / 100.0) * NOMINAL_CAPACITY
-        print(f"Predicted SOH: {pred_soh:.2f}%, Capacity: {pred_capacity:.2f} Ah")
+        print(f"Predicted SOH: {pred_soh:.2f}%, Capacity: {pred_capacity:.2f} Ah  (source={pred_soh_source})")
 
         print("Extracting FFT ground truth...")
         fft_ah, fft_v, _ = extract_and_resample_curve(fft_df)
@@ -391,6 +416,7 @@ def analyze():
 
         return jsonify({
             'soh': round(pred_soh, 2),
+            'soh_source': pred_soh_source,
             'capacity': int(round(pred_capacity)),
             'actual_capacity': round(actual_capacity, 2),
             'actual_soh': round(actual_soh, 2),
@@ -401,6 +427,10 @@ def analyze():
             'actual_knee_ah': round(actual_knee_ah, 2) if actual_knee_ah is not None else None,
             'actual_knee_v': round(actual_knee_v, 3) if actual_knee_v is not None else None,
             'knee_error_ah': round(knee_error_ah, 2) if knee_error_ah is not None else None,
+            'modules': module_result['modules'] if module_result else None,
+            'weakest_module_predicted': module_result['weakest_module_predicted'] if module_result else None,
+            'weakest_module_actual': module_result['weakest_module_actual'] if module_result else None,
+            'module_error': module_error,
             'plot': plot_url
         })
         

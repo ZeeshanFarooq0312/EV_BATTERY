@@ -10,6 +10,8 @@ from sklearn.metrics import mean_absolute_error
 import warnings
 warnings.filterwarnings('ignore')
 
+from physics_calibration import calibrate as _pc_calibrate
+
 # CORRECTED: Ground truth SOH for each pack at each C-rate
 SOH_GROUND_TRUTH = {
     'pk1': {0.3: 95.88, 1.0: 94.40},
@@ -34,7 +36,11 @@ NOMINAL_CAPACITY = 156.0
 SYNTHETIC_SOH_FLOOR = 80.0
 SYNTHETIC_SOH_CEILING = 100.0
 SYNTH_SAMPLES_PER_TEMPLATE = 100
-EXTRA_IR_DROP_PER_SOH_POINT = {'0.3C': 0.03, '1.0C': 0.015}
+# Was a hardcoded, INCONSISTENT-with-curve_train.py constant (0.3C value was
+# 10x too large and the C-rate ratio was inverted -- real data shows 1.0C sag
+# is ~4.5x LARGER than 0.3C, not half). Now sourced from
+# physics_calibration.py's regression across all real full-curve tests.
+EXTRA_IR_DROP_PER_SOH_POINT = {bucket: fit['slope'] for bucket, fit in _pc_calibrate()['ir_sag_fit'].items()}
 
 
 def generate_synthetic_soh_dataframe(df, template_soh, target_soh, c_rate_name):

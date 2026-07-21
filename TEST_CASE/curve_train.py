@@ -12,46 +12,34 @@ from sklearn.multioutput import MultiOutputRegressor
 import warnings
 warnings.filterwarnings('ignore')
 
+from curve_utils import (
+    NOMINAL_CAPACITY, HEAD_CHECKPOINTS_PCT, SFT_SAMPLE_FRACTIONS,
+    compute_soh, extract_and_resample_curve, extract_enhanced_features,
+    detect_knee_index,
+)
+from physics_calibration import calibrate as _pc_calibrate
+
 # SOH is now derived from measured capacity instead of a hardcoded lookup:
 #   SOH = (actual_capacity_delivered / NOMINAL_CAPACITY) * 100
-NOMINAL_CAPACITY = 156.0
 
 # Real packs only span ~86.7%-95.9% SOH. We extrapolate synthetic curves down
 # to this floor so the model also learns what a more degraded pack looks like.
 SYNTHETIC_SOH_FLOOR = 80.0
 
 # Extra start-of-discharge IR sag (volts) introduced per percentage point of
-# SOH degraded *beyond* a template's own SOH, measured from real 0.3C vs 1.0C
-# packs (pk1/pk4 FFCT curves): ~30mV drop in the first 1% of capacity at 0.3C
-# vs ~130-150mV at 1.0C -> roughly a 4-5x sharper initial drop under load.
-EXTRA_IR_DROP_PER_SOH_POINT = {'0.3C': 0.003, '1.0C': 0.015}
+# SOH degraded *beyond* a template's own SOH. Sourced from
+# physics_calibration.py's regression across all real full-curve tests
+# (single source of truth -- this used to be a second, independently
+# hardcoded copy that drifted out of sync with module_soh_train.py's, which
+# had the wrong value and the wrong C-rate ratio direction).
+_cal = _pc_calibrate()
+EXTRA_IR_DROP_PER_SOH_POINT = {
+    bucket: fit['slope'] for bucket, fit in _cal['ir_sag_fit'].items()
+}
 IR_DROP_DECAY_FRACTION = 0.05  # sag fades out over the first 5% of capacity
 
 SYNTH_CURVES_PER_CRATE = 60
 
-# Checkpoints as a fraction of the COMPLETE discharge (0-100% of total
-# capacity). Keeps the original uniform 2.5% resolution everywhere (that
-# density mattered for generalizing across separate SFT/FFCT test sessions,
-# not just same-curve slicing) and ADDS extra points at the start (initial
-# IR-drop knee) and from 71.25-100% (discharge knee, which real 0.3C/1.0C
-# packs show at ~83-92% of total capacity) -- density is added, not moved.
-HEAD_CHECKPOINTS_PCT = [
-    0.0, 0.0125, 0.025, 0.0375, 0.05, 0.0625, 0.075, 0.0875, 0.1, 0.125, 0.15, 0.175, 0.2, 0.225, 0.25, 0.275, 0.3, 0.325,
-    0.35, 0.375, 0.4, 0.425, 0.45, 0.475, 0.5, 0.525, 0.55, 0.575, 0.6, 0.625, 0.65, 0.675, 0.7, 0.7125, 0.725, 0.7375,
-    0.75, 0.7625, 0.775, 0.7875, 0.8, 0.8125, 0.825, 0.8375, 0.85, 0.8625, 0.875, 0.8875, 0.9, 0.9125, 0.925, 0.9375,
-    0.95, 0.9625, 0.975, 0.9875, 1.0
-]
-
-# Fractions of the OBSERVED TAIL's own Ah span used to sample its real voltage
-# curve. Same principle: original ~2.5%-step density kept over the first 65%
-# of the tail, doubled density (~1.3% step) added over the last ~34%, where
-# the discharge knee almost always falls.
-SFT_SAMPLE_FRACTIONS = [
-    0.0, 0.026, 0.052, 0.078, 0.104, 0.13, 0.156, 0.182, 0.208, 0.234, 0.26, 0.286, 0.312, 0.338, 0.364, 0.39, 0.416,
-    0.442, 0.468, 0.494, 0.52, 0.546, 0.572, 0.598, 0.624, 0.65, 0.6635, 0.6764, 0.6894, 0.7023, 0.7153, 0.7282, 0.7412,
-    0.7541, 0.767, 0.78, 0.7929, 0.8059, 0.8188, 0.8318, 0.8447, 0.8576, 0.8706, 0.8835, 0.8965, 0.9094, 0.9223, 0.9353,
-    0.9482, 0.9612, 0.9741, 0.9871, 1.0
-]
 # Real 0.3C/1.0C packs show the discharge knee at ~83-92% of total capacity.
 # The original cutoffs (0.20-0.75) always land BEFORE the knee, so the model
 # always sees "knee + everything after it" bundled together in the observed
@@ -68,98 +56,6 @@ CUTOFF_PCTS = [
 # When cutting a synthetic curve's post-knee decay, how much steeper/shallower
 # to make it vs. the template it's derived from (see generate_synthetic_curve).
 POST_KNEE_DECAY_JITTER = (0.7, 1.5)
-
-
-def extract_and_resample_curve(file_path):
-    df = pd.read_csv(file_path)
-    cell_cols = [c for c in df.columns if 'Cell' in c and 'Temperature' not in c]
-    df['Mean_Cell_Voltage'] = df[cell_cols].mean(axis=1)
-
-    discharge_df = df[(df['Mean_Cell_Voltage'] < 4.15) & (df['Mean_Cell_Voltage'] > 2.0)].copy()
-    if 'AHDischarge' not in discharge_df.columns:
-        return None, None, None
-
-    discharge_df = discharge_df.sort_values('AHDischarge')
-    discharge_df['Ah_Relative'] = discharge_df['AHDischarge'] - discharge_df['AHDischarge'].iloc[0]
-
-    ah = discharge_df['Ah_Relative'].values
-    v = discharge_df['Mean_Cell_Voltage'].values
-
-    if len(cell_cols) > 0:
-        mask = (df['Mean_Cell_Voltage'] < 4.15) & (df['Mean_Cell_Voltage'] > 2.0)
-        cell_std = df[cell_cols].std(axis=1)[mask].values
-    else:
-        cell_std = None
-
-    return ah, v, cell_std
-
-
-def compute_soh(total_capacity_ah):
-    return float((total_capacity_ah / NOMINAL_CAPACITY) * 100.0)
-
-
-def extract_enhanced_features(sft_v, sft_ah, cell_data=None):
-    features = {}
-
-    dv_dah = np.gradient(sft_v, sft_ah)
-    d2v_dah2 = np.gradient(dv_dah, sft_ah)
-
-    mid_idx = len(sft_v) // 2
-    features['initial_slope'] = float((sft_v[mid_idx] - sft_v[0]) / (sft_ah[mid_idx] - sft_ah[0] + 1e-5))
-    features['final_slope'] = float((sft_v[-1] - sft_v[mid_idx]) / (sft_ah[-1] - sft_ah[mid_idx] + 1e-5))
-    features['overall_slope'] = float((sft_v[-1] - sft_v[0]) / (sft_ah[-1] - sft_ah[0] + 1e-5))
-
-    features['mean_curvature'] = float(np.mean(np.abs(d2v_dah2)))
-    features['max_curvature'] = float(np.max(np.abs(d2v_dah2)))
-    features['curvature_std'] = float(np.std(d2v_dah2))
-
-    features['voltage_std'] = float(np.std(sft_v))
-    features['voltage_range'] = float(sft_v[0] - sft_v[-1])
-    features['voltage_mean'] = float(np.mean(sft_v))
-
-    plateau_mask = (sft_v > 3.4) & (sft_v < 3.7)
-    features['plateau_length'] = float(np.sum(plateau_mask) / len(sft_v))
-
-    end_idx = int(len(sft_v) * 0.8)
-    features['end_slope'] = float((sft_v[-1] - sft_v[end_idx]) / (sft_ah[-1] - sft_ah[end_idx] + 1e-5))
-    features['end_voltage_drop'] = float(sft_v[end_idx] - sft_v[-1])
-
-    if cell_data is not None and len(cell_data) > 0:
-        features['cell_imbalance_mean'] = float(np.mean(cell_data))
-        features['cell_imbalance_std'] = float(np.std(cell_data))
-    else:
-        features['cell_imbalance_mean'] = 0.0
-        features['cell_imbalance_std'] = 0.0
-
-    # Locate the sharpest local bend in the observed tail -- an explicit signal
-    # for where the discharge knee sits and how steep it is, on top of the
-    # coarser aggregate stats above.
-    knee_idx = int(np.argmax(np.abs(dv_dah)))
-    features['tail_knee_pct'] = float(sft_ah[knee_idx] / (sft_ah[-1] + 1e-5))
-    features['tail_knee_slope'] = float(dv_dah[knee_idx])
-
-    return features
-
-
-def detect_knee_index(ah, v, search_start_pct=0.5, search_end_pct=0.99):
-    """Chord-distance elbow detection (same method used by app.py at inference
-    time): the point in the search window with maximum perpendicular distance
-    from the straight line joining the window's endpoints."""
-    total = ah[-1]
-    mask = (ah >= search_start_pct * total) & (ah <= search_end_pct * total)
-    idx = np.where(mask)[0]
-    if len(idx) < 3:
-        return len(ah) - 1
-
-    ah_w, v_w = ah[idx], v[idx]
-    ah_n = (ah_w - ah_w[0]) / (ah_w[-1] - ah_w[0] + 1e-9)
-    v_n = (v_w - v_w[0]) / (v_w[-1] - v_w[0] + 1e-9)
-    x1, y1 = ah_n[0], v_n[0]
-    x2, y2 = ah_n[-1], v_n[-1]
-    num = np.abs((y2 - y1) * ah_n - (x2 - x1) * v_n + x2 * y1 - y2 * x1)
-    den = np.sqrt((y2 - y1) ** 2 + (x2 - x1) ** 2) + 1e-9
-    dist = num / den
-    return int(idx[np.argmax(dist)])
 
 
 def generate_synthetic_curve(template_ah, template_v, template_cell_std, template_soh, c_rate_name):
