@@ -71,6 +71,26 @@ def calibrate(data_folder=DEFAULT_DATA_FOLDER, force=False):
     # sweep pairs the SAME real spread/imbalance value with wildly different
     # SOH targets, actively teaching the model those features are irrelevant).
     structural_rows = {'0.3C': [], '1.0C': []}
+    # Same problem, different features: ah_per_voltage_drop/mean_dV_dAh/
+    # std_dV_dAh/min_dV_dAh describe the CURVE'S SHAPE (how fast voltage moves
+    # per Ah, and how that varies), not just its level -- _legacy_build_synthetic_rows
+    # used to leave these frozen at the template's real value too, so a
+    # synthetic row's degraded voltage LEVEL was never accompanied by the
+    # shape change a genuinely more-degraded module actually has (steeper,
+    # more variable dV/dAh as the knee approaches). Confirmed this matters:
+    # pk5 (the one real pack with genuinely low SOH, ~86-92%) was the worst-
+    # or near-worst-generalizing pack under leave-one-pack-out even AFTER
+    # its own real data was added to training -- the model had almost no
+    # signal that these shape features move at all with degradation.
+    shape_rows = {'0.3C': [], '1.0C': []}
+    # (plateau_v, span_v) per real full-curve file, per C-rate bucket --
+    # synthetic_module_generator.py previously sampled these from hardcoded
+    # guesses (plateau ~3.45-3.75V, span ~1.0-1.4V) completely independent of
+    # real data, which is why its synthetic end_voltage [2.03V,2.81V] sat well
+    # below real end_voltage [2.71V,3.18V] even after the SOH-range fix (that
+    # only fixed CAPACITY, not voltage LEVEL) -- caught by
+    # validate_synthetic_module_generator.py's distributional sanity check.
+    plateau_span_rows = {'0.3C': [], '1.0C': []}
 
     module_soh_lookup = None
 
@@ -86,6 +106,18 @@ def calibrate(data_folder=DEFAULT_DATA_FOLDER, force=False):
             ir_sag_rows[bucket].append((100.0 - pack_soh, sag))
 
         heterogeneity_mv.append(_measure_pack_heterogeneity_mv(modules))
+
+        # Same plateau window build_canonical_shape() itself uses to
+        # normalize a curve (frac in (0.2, 0.4)) -- kept consistent so the
+        # sampled plateau_v/span_v describe the same reference point the
+        # canonical shape is warped around.
+        frac = ah / ah[-1]
+        plateau_mask = (frac > 0.2) & (frac < 0.4)
+        plateau_v = float(np.mean(pack_v[plateau_mask])) if np.any(plateau_mask) else float(pack_v[0])
+        end_v = float(pack_v[-1])
+        span_v = plateau_v - end_v
+        if span_v > 0:
+            plateau_span_rows[bucket].append((plateau_v, span_v))
 
         df = pd.read_csv(entry['path'])
         cell_cols = get_cell_columns(df)
@@ -110,6 +142,8 @@ def calibrate(data_folder=DEFAULT_DATA_FOLDER, force=False):
                 if f is None:
                     continue
                 structural_rows[bucket].append((100.0 - soh, f['max_cell_spread_at_end'], f['mean_cell_imbalance_std']))
+                shape_rows[bucket].append((100.0 - soh, f['ah_per_voltage_drop'], f['mean_dV_dAh'],
+                                            f['std_dV_dAh'], f['min_dV_dAh']))
 
         cutoff_v = float(df[cell_cols].min(axis=1).iloc[-1])
         for m in range(1, N_MODULES + 1):
@@ -167,9 +201,30 @@ def calibrate(data_folder=DEFAULT_DATA_FOLDER, force=False):
             fit[name] = {'slope': float(slope), 'intercept': float(intercept)}
         structural_growth_fit[bucket] = fit
 
+    shape_growth_fit = {}
+    for bucket, rows in shape_rows.items():
+        if len(rows) < 5:
+            continue
+        x = np.array([r[0] for r in rows])
+        A = np.vstack([x, np.ones_like(x)]).T
+        fit = {}
+        for name, idx in (('ah_per_voltage_drop', 1), ('mean_dV_dAh', 2), ('std_dV_dAh', 3), ('min_dV_dAh', 4)):
+            y = np.array([r[idx] for r in rows])
+            slope, intercept = np.linalg.lstsq(A, y, rcond=None)[0]
+            fit[name] = {'slope': float(slope), 'intercept': float(intercept)}
+        shape_growth_fit[bucket] = fit
+
+    plateau_v_range = {b: (float(np.percentile([r[0] for r in rows], 5)), float(np.percentile([r[0] for r in rows], 95)))
+                        for b, rows in plateau_span_rows.items() if rows}
+    span_v_range = {b: (float(np.percentile([r[1] for r in rows], 5)), float(np.percentile([r[1] for r in rows], 95)))
+                     for b, rows in plateau_span_rows.items() if rows}
+
     result = {
         'ir_sag_fit': ir_sag_fit,
         'structural_growth_fit': structural_growth_fit,
+        'shape_growth_fit': shape_growth_fit,
+        'plateau_v_range': plateau_v_range,
+        'span_v_range': span_v_range,
         'heterogeneity_mv_range': (
             (float(np.percentile(heterogeneity_mv, 5)), float(np.percentile(heterogeneity_mv, 95)))
             if heterogeneity_mv else (400.0, 1000.0)
@@ -208,6 +263,46 @@ def structural_growth_delta(c_rate_name, extra_degradation, data_folder=DEFAULT_
     if not fit:
         return 0.0, 0.0
     return fit['spread']['slope'] * extra_degradation, fit['imbalance']['slope'] * extra_degradation
+
+
+def shape_growth_delta(c_rate_name, extra_degradation, data_folder=DEFAULT_DATA_FOLDER):
+    """How much ah_per_voltage_drop / mean_dV_dAh / std_dV_dAh / min_dV_dAh --
+    the features describing the discharge curve's SHAPE at this slice, not
+    just its voltage level -- should shift for a module synthesized
+    `extra_degradation` SOH-points weaker than its real template, per
+    calibrate()'s shape_growth_fit. Same rationale as structural_growth_delta:
+    freezing these at the template's value pairs one real shape with an
+    entire synthetic SOH sweep, teaching the model they carry no signal --
+    the specific gap that left pk5 (the one real pack with genuinely low
+    SOH) poorly generalized even after its own real data was in training.
+    Returns 0.0 for any feature without enough real data to fit."""
+    cal = calibrate(data_folder)
+    fit = cal['shape_growth_fit'].get(c_rate_name)
+    if not fit:
+        return 0.0, 0.0, 0.0, 0.0
+    return (fit['ah_per_voltage_drop']['slope'] * extra_degradation,
+            fit['mean_dV_dAh']['slope'] * extra_degradation,
+            fit['std_dV_dAh']['slope'] * extra_degradation,
+            fit['min_dV_dAh']['slope'] * extra_degradation)
+
+
+def sample_plateau_v(c_rate_name, rng, data_folder=DEFAULT_DATA_FOLDER):
+    """Plateau (near-start) voltage a synthetic virtual pack's curve is built
+    around, drawn from real full-curve packs' own measured plateau (mean
+    voltage in the 20-40% capacity fraction window) at this C-rate -- was a
+    hardcoded (3.45, 3.75) guess uncorrelated with real data."""
+    cal = calibrate(data_folder)
+    lo, hi = cal['plateau_v_range'].get(c_rate_name, (3.45, 3.75))
+    return float(rng.uniform(lo, hi))
+
+
+def sample_span_v(c_rate_name, rng, data_folder=DEFAULT_DATA_FOLDER):
+    """Plateau-to-cutoff voltage span, drawn from real full-curve packs' own
+    measured (plateau_v - final_v) at this C-rate -- was a hardcoded
+    (1.0, 1.4) guess."""
+    cal = calibrate(data_folder)
+    lo, hi = cal['span_v_range'].get(c_rate_name, (1.0, 1.4))
+    return float(rng.uniform(lo, hi))
 
 
 def sample_cell_imbalance_v(c_rate_name, rng, data_folder=DEFAULT_DATA_FOLDER):

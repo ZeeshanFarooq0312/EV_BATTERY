@@ -98,6 +98,46 @@ def build_module_dataset(data_folder=DATA_FOLDER, verbose=True):
     return pd.DataFrame(rows)
 
 
+def load_module_templates(data_folder=DATA_FOLDER, verbose=False):
+    """Real Tier-0 weakest-module (ah, min_v) curve per (pack_id, c_rate_bucket)
+    -- for use as the Tier-2 shape-transfer template when no ground-truth FFT
+    file is available at inference time (an SFT-only upload, unlike
+    build_module_dataset's own use of that SAME test's own weakest module,
+    which requires the full curve). c_rate_bucket uses the same >=0.9 -> 1.0
+    else 0.3 split as module_soh_train.py/app.py.
+
+    Returns {(pack_id, c_rate_bucket): (ah, min_v)}.
+    """
+    templates = {}
+    for entry in list_full_curve_files(data_folder):
+        fname = os.path.basename(entry['path'])
+        ah, pack_v, cell_std, modules = extract_and_resample_curve(entry['path'], want_modules=True)
+        if ah is None:
+            continue
+
+        cutoff_v = float(pd.read_csv(entry['path'], usecols=['min_v'])['min_v'].iloc[-1])
+        if not (MIN_VALID_MIN_V <= cutoff_v <= MAX_VALID_MIN_V):
+            if verbose:
+                print(f"  [skip] {fname}: final min_v={cutoff_v:.3f} outside sanity band")
+            continue
+
+        tier0 = {}
+        for m, traces in modules.items():
+            idx = find_crossing_index(ah, traces['min_v'], cutoff_v)
+            if idx is not None:
+                tier0[m] = _interp_crossing_ah(ah, traces['min_v'], idx, cutoff_v)
+        if not tier0:
+            continue
+
+        weakest_module = min(tier0, key=tier0.get)
+        c_bucket = 1.0 if entry['c_rate'] >= 0.9 else 0.3
+        key = (entry['pack_id'], c_bucket)
+        if key not in templates:
+            templates[key] = (ah, modules[weakest_module]['min_v'])
+
+    return templates
+
+
 if __name__ == "__main__":
     print(f"Building module dataset from {DATA_FOLDER} ...")
     df = build_module_dataset()

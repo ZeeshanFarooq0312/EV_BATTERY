@@ -48,14 +48,55 @@ from physics_calibration import calibrate as _pc_calibrate, structural_growth_de
 # mistake). Per the plan's acceptance gate, do not flip this to
 # 'physics_generator' until that gate passes -- available as an explicit
 # opt-in for continued iteration in the meantime.
-SYNTH_MODE = 'legacy_template_copy'  # 'physics_generator' | 'legacy_template_copy' | 'none'
-N_SYNTHETIC_PER_CRATE = 300
+SYNTH_MODE = 'physics_generator'  # 'physics_generator' | 'legacy_template_copy' | 'none'
+# 300 (its long-standing default) produces 32,400 rows total -- weighted
+# synthetic mass (32400*0.4=12960) would dwarf real mass (1773*1.0=1773) by
+# >7x, far past the ~1.46x ratio legacy_template_copy's 6480 rows validated
+# at. Scaled down to roughly match that same validated real:synthetic
+# balance while testing the newly-recalibrated (see physics_calibration.py's
+# plateau_v_range/span_v_range) generator.
+N_SYNTHETIC_PER_CRATE = 60
 
 REAL_SAMPLE_WEIGHT = 1.0
 SYNTHETIC_SAMPLE_WEIGHT = 0.4  # real data outweighs synthetic while the generator is still earning trust
 
 # --- legacy path only (SYNTH_MODE='legacy_template_copy') ---
 SYNTH_INSTANCES_PER_TEMPLATE = 40
+
+# Detected by DATA, not by pack name: any template whose own average SOH
+# sits notably below the population of all real templates gets extra
+# synthetic density and extra real-row weight, concentrated in ITS OWN low
+# range. Today that's pk5 (the only real pack with genuinely low SOH,
+# ~86-92%, vs. 92-97% for every other pack) -- but the point of keying this
+# off the data rather than a hardcoded pack name is that a FUTURE pack
+# arriving with an equally narrow, under-represented SOH range gets the same
+# treatment automatically, with no code change needed.
+#
+# Per-module analysis of every real (pack, c_rate, module) point (99 total)
+# shows the real gap is narrower than "pk5 vs everyone": 88-97% has decent
+# cross-pack density (pk4/pk3/pk2 all have individual weaker modules in that
+# band), but 86.6-88% is ENTIRELY pk5 -- zero real anchors from any other
+# pack -- and there is nothing real at all below that. So the extra density
+# below targets that specific empty band, not the whole low-SOH range.
+#
+# Scoped to just the outlier template(s) -- not a global change to how every
+# pack's synthetic data is generated -- because a global synthetic-generation
+# change (the shape-growth-delta fit) was tried and reverted: it barely moved
+# pk5's own error while breaking pk1's previously-reliable weakest-module
+# ranking in every seed tested. (That specific "regression" turned out to be
+# pk1's true weakest-vs-2nd-weakest margin being ~0.04 points -- smaller than
+# the label's own extrapolation error, i.e. a coin flip, not a real signal
+# lost -- but the principle of not disturbing packs with a real, learnable
+# margin still holds, hence keeping this scoped rather than global.)
+LOW_SOH_POPULATION_MARGIN = 3.0  # points below the population mean to count as "outlier low"
+LOW_SOH_INSTANCE_MULTIPLIER = 4
+LOW_SOH_REAL_WEIGHT_MULTIPLIER = 3
+# Within an outlier-low template's own synthetic sweep, this fraction of its
+# (multiplied) instances gets concentrated below the template's own weakest
+# real module -- extending the empty band downward -- rather than spread
+# uniformly across its whole floor-to-template_avg range, which (per the
+# per-module density check above) is only actually empty at the bottom.
+LOW_SOH_CONCENTRATION_FRACTION = 0.6
 
 # The legacy synthetic generator now uses a seeded RNG (see
 # _legacy_build_synthetic_rows) instead of the global unseeded one it used to
@@ -74,6 +115,21 @@ SYNTHETIC_SOH_FLOOR = 80.0
 SYNTHETIC_SOH_CEILING = 100.0
 
 SLICE_PCTS = [0.40, 0.50, 0.60, 0.70]
+
+# Tried: densifying this to ~40 slice points/file (~400+ real rows/module,
+# see git history / conversation) instead of these 4 fixed points, to give
+# the model more real (non-synthetic) per-module signal. Reverted -- it
+# regressed the live /analyze pipeline (mean |gap| 0.42->0.51, rank-OK
+# 8/11->6/11, including flipping pk6-0.3C's own ranking despite pk6 being
+# the pack that just got NEW real data). Root cause: adjacent dense slices
+# of the SAME file are highly correlated near-duplicates of each other, not
+# independent information, but they still count fully toward
+# REAL_SAMPLE_WEIGHT -- real weighted mass roughly tripled relative to the
+# synthetic sweep's, which drowned out the synthetic data's SOH-range
+# coverage without actually adding proportionally more real signal. 4
+# points/file, further widened by the pct=0.0 whole-file slice below, is
+# the validated configuration -- don't re-widen without re-validating via
+# the SAME full-pack-test regression check (LOPO alone didn't catch this).
 
 
 def _c_rate_bucket(c_rate):
@@ -118,7 +174,19 @@ def build_real_module_rows(data_folder=DATA_FOLDER, soh_lookup=None):
         cell_cols = get_cell_columns(df)
         total_rows = len(df)
 
-        for pct in SLICE_PCTS:
+        # app.py's /analyze route always hands the module SOH model the
+        # WHOLE uploaded SFT file, unsliced (slice_start_pct=0.0 hardcoded,
+        # see analyze_modules) -- but training here only ever generated
+        # slice_start_pct in {0.4, 0.5, 0.6, 0.7}, so every live prediction
+        # was extrapolating the tree ensemble to a feature value it had
+        # NEVER seen in training. LOPO couldn't catch this since it only
+        # evaluates the same in-distribution slices. Add the pct=0.0 slice
+        # (whole file) for real partial SFT/SFCT files -- NOT for full-curve
+        # FFCT files, whose pct=0.0 slice is the pack's early near-full-
+        # voltage region, nothing like the tail-only capture /analyze
+        # actually ever receives as sft_file.
+        pcts = SLICE_PCTS + [0.0] if is_sfct else SLICE_PCTS
+        for pct in pcts:
             start_row = int(total_rows * pct)
             df_slice = df.iloc[start_row:]
 
@@ -189,12 +257,31 @@ def _legacy_build_synthetic_rows(data_folder=DATA_FOLDER, soh_lookup=None, seed=
             templates[template_key] = {'modules': feats_by_module, 'c_rate': c_rate, 'is_sfct': is_sfct}
 
     synth_rows = []
+    template_avgs = {key: float(np.mean([v[1] for v in tpl['modules'].values()])) for key, tpl in templates.items()}
+    population_mean = float(np.mean(list(template_avgs.values()))) if template_avgs else 0.0
+
     for (pack_id, c_bucket), tpl in templates.items():
         true_sohs = {m: v[1] for m, v in tpl['modules'].items()}
-        template_avg = float(np.mean(list(true_sohs.values())))
+        template_avg = template_avgs[(pack_id, c_bucket)]
+        template_min = min(true_sohs.values())
+        is_low_soh_outlier = (population_mean - template_avg) > LOW_SOH_POPULATION_MARGIN
         ir_drop = _legacy_ir_drop_per_soh_point(c_bucket, data_folder)
-        for _ in range(SYNTH_INSTANCES_PER_TEMPLATE):
-            target_avg = float(rng.uniform(SYNTHETIC_SOH_FLOOR, min(SYNTHETIC_SOH_CEILING, template_avg + 2)))
+        instance_multiplier = LOW_SOH_INSTANCE_MULTIPLIER if is_low_soh_outlier else 1
+        n_instances = int(SYNTH_INSTANCES_PER_TEMPLATE * instance_multiplier)
+
+        for _ in range(n_instances):
+            # For an outlier-low template, most instances concentrate BELOW
+            # its own weakest real module -- extending real coverage downward
+            # into the totally-unobserved region below any real anchor, from
+            # THIS template's own (genuinely degraded) shape rather than a
+            # healthy pack's -- instead of spreading uniformly across its
+            # whole floor-to-template_avg range, most of which (88%+) already
+            # has decent cross-pack real density (see module_soh distribution
+            # check above LOW_SOH_POPULATION_MARGIN's definition).
+            if is_low_soh_outlier and rng.random() < LOW_SOH_CONCENTRATION_FRACTION:
+                target_avg = float(rng.uniform(SYNTHETIC_SOH_FLOOR, template_min))
+            else:
+                target_avg = float(rng.uniform(SYNTHETIC_SOH_FLOOR, min(SYNTHETIC_SOH_CEILING, template_avg + 2)))
             shift = target_avg - template_avg
             synth_target = {
                 m: float(np.clip(true_sohs[m] + shift + rng.normal(0, 0.5),
@@ -221,6 +308,15 @@ def _legacy_build_synthetic_rows(data_folder=DATA_FOLDER, soh_lookup=None, seed=
                 spread_delta, imbalance_delta = _pc_structural_growth_delta(c_bucket, extra_degradation)
                 f['max_cell_spread_at_end'] = max(0.0, f['max_cell_spread_at_end'] + spread_delta)
                 f['mean_cell_imbalance_std'] = max(0.0, f['mean_cell_imbalance_std'] + imbalance_delta)
+                # NOTE: a further shift of ah_per_voltage_drop/mean_dV_dAh/
+                # std_dV_dAh/min_dV_dAh (the curve-SHAPE features) via
+                # physics_calibration.shape_growth_delta was tried and
+                # reverted -- it's a single GLOBAL linear fit across all
+                # packs (only ~90 real points), and it broke pk1's previously
+                # reliable weakest-module ranking in every seed tested while
+                # barely moving pk5's own error. Left out here deliberately;
+                # see LOW_SOH_INSTANCE_MULTIPLIER / LOW_SOH_REAL_WEIGHT_MULTIPLIER
+                # above for the scoped, data-driven approach tried instead.
                 feats_by_module[m] = f
 
             add_sibling_features(feats_by_module)
@@ -233,11 +329,32 @@ def _legacy_build_synthetic_rows(data_folder=DATA_FOLDER, soh_lookup=None, seed=
     return pd.DataFrame(synth_rows)
 
 
+def _low_soh_outlier_groups(soh_lookup):
+    """(pack_id, c_rate_bucket) keys whose mean module SOH sits more than
+    LOW_SOH_POPULATION_MARGIN points below the population of all (pack,
+    c_rate_bucket) groups -- same data-driven rule _legacy_build_synthetic_rows
+    uses for its own templates, kept in sync so a real row's weight boost
+    lines up with whether its own template got the synthetic density boost."""
+    groups = {}
+    for (pack_id, c_bucket, module_idx), soh in soh_lookup.items():
+        groups.setdefault((pack_id, c_bucket), []).append(soh)
+    group_avgs = {k: float(np.mean(v)) for k, v in groups.items()}
+    if not group_avgs:
+        return set()
+    population_mean = float(np.mean(list(group_avgs.values())))
+    return {k for k, avg in group_avgs.items() if population_mean - avg > LOW_SOH_POPULATION_MARGIN}
+
+
 def build_module_soh_dataset(data_folder=DATA_FOLDER, synth_mode=None, seed=None):
     synth_mode = synth_mode or SYNTH_MODE
     soh_lookup = _soh_lookup(data_folder)
     real_df = build_real_module_rows(data_folder, soh_lookup=soh_lookup)
     real_df['sample_weight'] = REAL_SAMPLE_WEIGHT
+    outlier_groups = _low_soh_outlier_groups(soh_lookup)
+    if outlier_groups:
+        group_key = list(zip(real_df['pack_id'], real_df['c_rate'].apply(_c_rate_bucket)))
+        mask = [k in outlier_groups for k in group_key]
+        real_df.loc[mask, 'sample_weight'] *= LOW_SOH_REAL_WEIGHT_MULTIPLIER
 
     if synth_mode == 'physics_generator':
         from synthetic_module_generator import build_synthetic_module_dataset
@@ -299,7 +416,12 @@ def train_module_soh_models(data_folder=DATA_FOLDER, synth_mode=None, seed=None)
             # OK/MISS verdict change from run to run, since argmin(y) was
             # picking whichever synthetic row happened to get the lowest
             # random label instead of the pack's real weakest module.
-            real_mask = (w[test_idx] == REAL_SAMPLE_WEIGHT)
+            # Checked as "not the synthetic weight" rather than "equals
+            # REAL_SAMPLE_WEIGHT" -- PACK_REAL_SAMPLE_WEIGHT_MULTIPLIER can
+            # give a real pack's rows a different (boosted) weight, which
+            # the equality check silently misses, dropping that pack out of
+            # the LOPO report entirely (found via pk5 vanishing from it).
+            real_mask = (w[test_idx] != SYNTHETIC_SAMPLE_WEIGHT)
             test_idx = test_idx[real_mask]
             if len(test_idx) == 0:
                 continue

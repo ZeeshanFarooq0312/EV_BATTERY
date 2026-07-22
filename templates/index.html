@@ -320,13 +320,6 @@
                 <label for="fft_file">Upload FFT File (Full Ground Truth)</label>
                 <input type="file" id="fft_file" accept=".csv">
             </div>
-            <div class="select-group">
-                <label for="voltageCutoff">Voltage Cutoff</label>
-                <select id="voltageCutoff">
-                    <option value="3.2">3.2V</option>
-                    <option value="2.5">2.5V</option>
-                </select>
-            </div>
             <button id="analyzeBtn" onclick="analyzeBattery()">Analyze Battery</button>
         </div>
 
@@ -350,21 +343,39 @@
                 <h3>Actual SOH (Capacity/156)</h3>
                 <p class="value" id="actualSohValue">--%</p>
             </div>
+            <!--
             <div class="metric-card cutoff">
-                <h3>Capacity at <span id="cutoffLabel">3.2V</span></h3>
-                <p class="value" id="cutoffCapValue">-- Ah</p>
+                <h3>Weakest Module Capacity @ 3.2V</h3>
+                <p class="value" id="cap32Value">-- Ah</p>
+                <p style="font-size: 0.75rem; color: var(--text-muted); margin: 4px 0 0 0;">Actual: <span id="cap32ActualValue">--</span> Ah</p>
             </div>
+            <div class="metric-card cutoff">
+                <h3>Weakest Module SOH @ 3.2V</h3>
+                <p class="value" id="soh32Value">--%</p>
+                <p style="font-size: 0.75rem; color: var(--text-muted); margin: 4px 0 0 0;">Actual: <span id="soh32ActualValue">--</span>%</p>
+            </div>
+            <div class="metric-card cutoff">
+                <h3>Weakest Module Capacity @ 2.5V</h3>
+                <p class="value" id="cap25Value">-- Ah</p>
+                <p style="font-size: 0.75rem; color: var(--text-muted); margin: 4px 0 0 0;">Actual: <span id="cap25ActualValue">--</span> Ah</p>
+            </div>
+            <div class="metric-card cutoff">
+                <h3>Weakest Module SOH @ 2.5V</h3>
+                <p class="value" id="soh25Value">--%</p>
+                <p style="font-size: 0.75rem; color: var(--text-muted); margin: 4px 0 0 0;">Actual: <span id="soh25ActualValue">--</span>%</p>
+            </div>
+            -->
             <!--
             <div class="metric-card">
                 <h3>Reconstruction MAE</h3>
                 <p class="value" id="maeValue">-- mV</p>
             </div>
             -->
+            <!--
             <div class="metric-card knee">
                 <h3>Predicted Knee Point</h3>
                 <p class="value" id="predKneeValue">-- Ah</p>
             </div>
-            <!--
             <div class="metric-card knee">
                 <h3>Actual Knee Point</h3>
                 <p class="value" id="actualKneeValue">-- Ah</p>
@@ -377,12 +388,12 @@
         </div>
 
         <div class="plot-section" id="plotSection">
-            <h2>Complete Global Curve Reconstruction</h2>
+            <h2>Weakest Module Voltage Curve</h2>
             <p style="color: var(--text-muted); margin-top: -10px; margin-bottom: 15px;">
-                The model predicts the entire discharge curve (0-100% capacity) from the short SFT test - not just a missing segment.
-                Stars mark the detected discharge knee (the point of sharpest bend in the last half of the curve) on both the real and reconstructed curves.
+                The pack's weakest module's discharge curve: predicted (from the uploaded SFT) vs the real curve
+                (from the uploaded FFT). Circles mark predicted capacity/SOH at 3.2V and 2.5V; triangles mark the actual values.
             </p>
-            <img id="plotImage" src="" alt="Complete Global Curve Reconstruction Plot">
+            <img id="plotImage" src="" alt="Weakest Module Voltage Curve Plot">
         </div>
 
         <div class="module-section" id="moduleSection">
@@ -399,6 +410,46 @@
             <div id="moduleRows"></div>
             <p class="module-error-msg" id="moduleErrorMsg"></p>
         </div>
+
+        <!--
+        <div class="upload-section" style="margin-top: 10px;">
+            <div class="file-input-group">
+                <label for="wm_sft_file">Weakest Module Predictor &mdash; SFT File Only</label>
+                <input type="file" id="wm_sft_file" accept=".csv">
+            </div>
+            <button id="wmAnalyzeBtn" onclick="predictWeakestModule()">Predict Weakest Module</button>
+        </div>
+
+        <div class="loader" id="wmLoader"></div>
+
+        <div class="metrics-grid" id="wmMetricsGrid">
+            <div class="metric-card">
+                <h3>Weakest Module</h3>
+                <p class="value" id="wmModuleValue">--</p>
+            </div>
+            <div class="metric-card cutoff">
+                <h3>Capacity / SOH @ 3.2V</h3>
+                <p class="value" id="wm32Value" style="font-size:1.3rem;">--</p>
+            </div>
+            <div class="metric-card knee">
+                <h3>Capacity / SOH @ 2.5V</h3>
+                <p class="value" id="wm25Value" style="font-size:1.3rem;">--</p>
+            </div>
+        </div>
+
+        <div class="plot-section" id="wmPlotSection">
+            <h2>Weakest Module Voltage Curve</h2>
+            <p style="color: var(--text-muted); margin-top: -10px; margin-bottom: 15px;">
+                Identified from the uploaded SFT file alone (no FFT required). Dotted green is the
+                predicted head (0 Ah to SFT start) &mdash; approximate, from the pack-level reconstruction
+                model shifted to this module's own voltage level. Solid blue is the module's own observed
+                data. Dashed red is the physics-based extrapolated tail, using the same tiered
+                knee-extrapolation / shape-transfer method as the FFT comparison flow. Markers show
+                capacity and SOH at 3.2V and 2.5V.
+            </p>
+            <img id="wmPlotImage" src="" alt="Weakest Module Voltage Curve Plot">
+        </div>
+        -->
     </div>
 
     <script>
@@ -465,7 +516,6 @@
         async function analyzeBattery() {
             const sftFile = document.getElementById('sft_file').files[0];
             const fftFile = document.getElementById('fft_file').files[0];
-            const voltageCutoff = document.getElementById('voltageCutoff').value;
             const btn = document.getElementById('analyzeBtn');
             const loader = document.getElementById('loader');
 
@@ -485,7 +535,6 @@
             const formData = new FormData();
             formData.append('sft_file', sftFile);
             formData.append('fft_file', fftFile);
-            formData.append('voltage_cutoff', voltageCutoff);
 
             try {
                 const response = await fetch('/analyze', {
@@ -505,12 +554,24 @@
                     document.getElementById('capValue').innerText = data.capacity + " Ah";
                     document.getElementById('actualCapValue').innerText = data.actual_capacity + " Ah";
                     document.getElementById('actualSohValue').innerText = data.actual_soh + "%";
-                    document.getElementById('cutoffCapValue').innerText = data.cutoff_capacity + " Ah";
-                    document.getElementById('cutoffLabel').innerText = voltageCutoff + "V";
                     // document.getElementById('maeValue').innerText = data.mae + " mV";
-                    document.getElementById('predKneeValue').innerText = data.pred_knee_ah !== null ? (data.pred_knee_ah + " Ah") : "N/A";
+                    // document.getElementById('predKneeValue').innerText = data.pred_knee_ah !== null ? (data.pred_knee_ah + " Ah") : "N/A";
                     // document.getElementById('actualKneeValue').innerText = data.actual_knee_ah !== null ? (data.actual_knee_ah + " Ah") : "N/A";
                     // document.getElementById('kneeErrorValue').innerText = data.knee_error_ah !== null ? (data.knee_error_ah + " Ah") : "N/A";
+
+                    // Weakest-module capacity/SOH at both fixed cutoffs -- cards
+                    // removed, this is already shown directly on the plot's markers.
+                    const wm = data.weakest_module_results;
+                    if (false && wm) {
+                        document.getElementById('cap32Value').innerText = wm["3.2"].predicted.capacity_ah + " Ah";
+                        document.getElementById('cap32ActualValue').innerText = wm["3.2"].actual.capacity_ah;
+                        document.getElementById('soh32Value').innerText = wm["3.2"].predicted.soh + "%";
+                        document.getElementById('soh32ActualValue').innerText = wm["3.2"].actual.soh;
+                        document.getElementById('cap25Value').innerText = wm["2.5"].predicted.capacity_ah + " Ah";
+                        document.getElementById('cap25ActualValue').innerText = wm["2.5"].actual.capacity_ah;
+                        document.getElementById('soh25Value').innerText = wm["2.5"].predicted.soh + "%";
+                        document.getElementById('soh25ActualValue').innerText = wm["2.5"].actual.soh;
+                    }
 
                     // Update Plot
                     document.getElementById('plotImage').src = "data:image/png;base64," + data.plot;
@@ -530,6 +591,58 @@
                 // Reset UI
                 btn.disabled = false;
                 btn.innerText = "Analyze Battery";
+                loader.style.display = "none";
+            }
+        }
+
+        async function predictWeakestModule() {
+            const sftFile = document.getElementById('wm_sft_file').files[0];
+            const btn = document.getElementById('wmAnalyzeBtn');
+            const loader = document.getElementById('wmLoader');
+
+            if (!sftFile) {
+                alert("Please upload an SFT file.");
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerText = "Predicting...";
+            loader.style.display = "block";
+            document.getElementById('wmMetricsGrid').style.display = "none";
+            document.getElementById('wmPlotSection').style.display = "none";
+
+            const formData = new FormData();
+            formData.append('sft_file', sftFile);
+
+            try {
+                const response = await fetch('/analyze_weakest_module', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    document.getElementById('wmModuleValue').innerText = "Module " + data.weakest_module;
+
+                    const r32 = data.results["3.2"];
+                    const r25 = data.results["2.5"];
+                    document.getElementById('wm32Value').innerText = r32.capacity_ah + " Ah / " + r32.soh + "%";
+                    document.getElementById('wm25Value').innerText = r25.capacity_ah + " Ah / " + r25.soh + "%";
+
+                    document.getElementById('wmPlotImage').src = "data:image/png;base64," + data.plot;
+
+                    document.getElementById('wmMetricsGrid').style.display = "grid";
+                    document.getElementById('wmPlotSection').style.display = "block";
+                } else {
+                    alert("Error: " + data.error);
+                }
+            } catch (error) {
+                alert("An error occurred while predicting.");
+                console.error(error);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "Predict Weakest Module";
                 loader.style.display = "none";
             }
         }

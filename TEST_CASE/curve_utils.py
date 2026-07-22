@@ -141,6 +141,35 @@ def extract_enhanced_features(sft_v, sft_ah, cell_data=None):
     return features
 
 
+def detect_settle_index(ah, v, window=5, k=3.0, persist=15, max_search_ah_frac=0.08, max_search_ah_abs=5.0):
+    """Index where a trace's initial IR-drop/relaxation transient has settled
+    into its normal (much gentler) decline. A short test that starts
+    discharging from a rested/open-circuit state shows a real, physical sharp
+    initial sag (ohmic drop + polarization settling) before flattening into
+    the usual plateau slope -- distinct from, and much steeper than, the rest
+    of the curve. Finds the first point after which the rolling |dV/dAh|
+    stays at/below k times the trace's own median |dV/dAh| for `persist`
+    consecutive samples, searched only within the first
+    min(max_search_ah_abs, max_search_ah_frac * total_span) of the trace (a
+    genuine startup transient resolves quickly; searching further risks
+    latching onto an unrelated calm stretch elsewhere in the curve).
+    Returns 0 (no trim) if nothing qualifies within that window."""
+    dv = np.diff(v) / np.clip(np.diff(ah), 1e-6, None)
+    if len(dv) < window + persist:
+        return 0
+    roll = np.convolve(np.abs(dv), np.ones(window) / window, mode='valid')
+    ref = np.median(np.abs(dv))
+    thresh = max(k * ref, 1e-4)
+    below = roll <= thresh
+    search_limit_ah = min(max_search_ah_abs, max_search_ah_frac * (ah[-1] - ah[0]))
+    search_limit_idx = np.searchsorted(ah, ah[0] + search_limit_ah)
+    limit = min(len(below) - persist, search_limit_idx)
+    for i in range(max(limit, 0)):
+        if below[i:i + persist].all():
+            return i
+    return 0
+
+
 def detect_knee_index(ah, v, search_start_pct=0.5, search_end_pct=0.99, fallback='last'):
     """Chord-distance elbow detection: the point in the search window with
     maximum perpendicular distance from the straight line joining the

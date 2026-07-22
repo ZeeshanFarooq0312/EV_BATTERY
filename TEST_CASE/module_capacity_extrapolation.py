@@ -310,6 +310,42 @@ def estimate_module_capacity(ah, module_v, cutoff_v, template_ah=None, template_
     return max(capacity_ah, observed_floor), 'extrapolated_shape_transfer', diagnostics
 
 
+def estimate_module_capacity_at_targets(ah, module_v, target_cutoffs, template_ah=None, template_v=None,
+                                         n_tail_points=60, **kwargs):
+    """Same tiered method as estimate_module_capacity, evaluated at several
+    target cutoff voltages (e.g. [3.2, 2.5]) plus a dense extrapolated tail
+    curve for plotting -- built by re-evaluating that SAME fit at intermediate
+    cutoff voltages, so the plotted tail and the reported target points are
+    exactly consistent with each other (same underlying fit, just sampled more
+    finely), rather than two independently-computed things that could disagree.
+
+    Returns (targets, tail_ah, tail_v):
+      targets  -- {cutoff_v: (capacity_ah, label_source, diagnostics)}
+      tail_ah, tail_v -- arrays for the extrapolated segment beyond the last
+                         observed point, down to min(target_cutoffs). Empty
+                         arrays if the trace already covers that whole range.
+    """
+    targets = {
+        cv: estimate_module_capacity(ah, module_v, cv, template_ah=template_ah, template_v=template_v, **kwargs)
+        for cv in target_cutoffs
+    }
+
+    v_last = float(module_v[-1])
+    v_floor = min(target_cutoffs)
+    if v_last <= v_floor:
+        return targets, np.array([]), np.array([])
+
+    sample_cutoffs = np.linspace(v_last - 1e-4, v_floor, n_tail_points)
+    tail_ah, tail_v = [], []
+    for cv in sample_cutoffs:
+        cap_ah, _source, _diag = estimate_module_capacity(
+            ah, module_v, float(cv), template_ah=template_ah, template_v=template_v, **kwargs
+        )
+        tail_ah.append(cap_ah)
+        tail_v.append(float(cv))
+    return targets, np.array(tail_ah), np.array(tail_v)
+
+
 def naive_linear_capacity(ah, v, cutoff_v, tail_frac=0.1):
     """Baseline for comparison only (see module docstring) -- fits a straight
     line to the last tail_frac of observed data and extrapolates it to

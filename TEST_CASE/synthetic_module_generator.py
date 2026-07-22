@@ -46,12 +46,15 @@ DEFAULT_DATA_FOLDER = pc.DEFAULT_DATA_FOLDER
 # to have exercised.
 SLICE_PCTS = [0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
 
-SYNTH_SOH_FLOOR = 70.0
-SYNTH_SOH_CEILING = 100.0
-# Real packs' own baseline SOH spans 86.8-96.8%; sample the per-instance
-# baseline a bit wider than that so the model also sees more-degraded packs,
-# consistent with the old code's SYNTHETIC_SOH_FLOOR philosophy.
-BASELINE_SOH_RANGE = (80.0, 97.0)
+SYNTH_SOH_FLOOR = 82.0
+SYNTH_SOH_CEILING = 99.0
+# Real packs' own module SOH spans ~86.6-98.2% (pk5's weakest module to
+# pk6's strongest); was (80,97)/floor=70, wide enough that synthetic curves
+# routinely simulated end-voltages no real pack has ever reached (validated
+# range [2.04V,2.80V] vs real [2.71V,3.18V]) -- the generalization gate's
+# root failure. Narrowed to track real data with a little headroom rather
+# than extrapolating degradation levels nothing in the dataset supports.
+BASELINE_SOH_RANGE = (85.0, 98.0)
 
 # Tunable knobs calibrated from n=6 packs (see plan's "explicit scope cuts") --
 # not precise physical constants, adjust if the generalization gate wants it.
@@ -166,8 +169,14 @@ def generate_virtual_pack_dataframe(c_rate_name, rng, data_folder=DEFAULT_DATA_F
 
     n_rows = max(500, int(pack_capacity_ah * ROWS_PER_AH))
     ah = np.linspace(0.0, pack_capacity_ah, n_rows)
-    plateau_v = float(rng.uniform(3.45, 3.75))
-    span_v = float(rng.uniform(1.0, 1.4))  # plateau-to-cutoff voltage span
+    # Real-data-calibrated (see physics_calibration.py's plateau_v_range/
+    # span_v_range) -- was a hardcoded (3.45,3.75)/(1.0,1.4) guess
+    # uncorrelated with real data, which left synthetic end_voltage sitting
+    # well below real end_voltage regardless of the SOH/capacity range
+    # (caught by validate_synthetic_module_generator.py's distributional
+    # sanity check).
+    plateau_v = pc.sample_plateau_v(c_rate_name, rng, data_folder)
+    span_v = pc.sample_span_v(c_rate_name, rng, data_folder)  # plateau-to-cutoff voltage span
 
     data = {'AHDischarge': ah}
     for m in range(1, N_MODULES + 1):
