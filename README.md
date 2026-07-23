@@ -1,77 +1,102 @@
 # EV Battery SOH & Discharge Curve Reconstruction
 
-Machine-learning pipeline that estimates the **State of Health (SOH)** of an EV battery pack and **reconstructs its complete discharge voltage curve** (0–100% of capacity) from a short field test — without needing to run a full multi-hour characterization test.
+Machine-learning pipeline that estimates the **State of Health (SOH)** of an EV battery pack at the **module level**, identifies its **weakest module** (the one that determines the whole pack's usable capacity), and **reconstructs its complete discharge voltage curve** (0–100% of capacity) — all from a short field test (SFT/SFCT), without needing to run a full multi-hour characterization test (FFCT/FFT).
 
 ## Why this exists
 
 A full characterization test (**FFCT** — Full Function/Characterisation Test) takes hours and fully discharges the pack to measure its true capacity. That's impractical to run often in the field. A **short test** (**SFT/SFCT** — Short Function/Characterisation Test) only captures the tail end of a discharge and takes minutes.
 
 This project trains models to go from a short test to:
-1. An estimated **SOH / capacity**, and
-2. A reconstructed **complete voltage-vs-capacity discharge curve**, including the **discharge knee** — the sharp voltage drop near end-of-discharge.
+1. Which of the pack's 9 modules is **weakest** (in a series-connected pack, the whole pack's capacity is set by its weakest module — not an average across modules),
+2. That module's **SOH / capacity at fixed voltage cutoffs** (3.2V and 2.5V), and
+3. Its reconstructed **complete voltage-vs-capacity discharge curve**, including the **discharge knee** — the sharp voltage drop near end-of-discharge.
 
-## How it works (two-part pipeline)
+## The core insight: module-level, not pack-level
+
+A "pack" is just a container — 9 modules × 12 cells = 108 cells, wired in series. The real unit of prediction is the **module**: each of a pack's 9 modules degrades independently and has its own SOH. Six real packs therefore give ~54 real module-level training examples per C-rate, not 6. Every model in this pipeline treats rows at the module level, and `pack_id` is explicitly excluded from the features fed to any model — it's only used for grouping (Leave-One-Pack-Out validation) and for computing sibling features (a module's voltage relative to its own pack's other 8 modules), never as a model input. This is what lets the models generalize to a pack they've never seen.
+
+Because a pack's discharge always stops when its single weakest cell crosses the low safety cutoff, a full-curve (FFCT) file directly gives the *real, measured* capacity of whichever module owns that weakest cell — the other 8 modules' true capacity has to be estimated via tiered extrapolation (see `module_capacity_extrapolation.py`).
+
+## How it works (pipeline)
 
 ```
-Short test (SFT/SFCT file)
+Uploaded SFT file (partial, tail-only) + FFT file (full, ground truth)
         │
         ▼
-┌───────────────────────┐
-│ Part 1: SOH model     │  shape features (voltage drop, cell imbalance,
-│ (soh_model_*.pkl)     │  temperature, dV/dAh stats, C-rate) → predicted SOH%
-└───────────┬───────────┘
-            │  predicted capacity = (SOH / 100) * 156 Ah
-            ▼
-┌───────────────────────┐
-│ Part 2: Reconstruction│  observed short-test voltage samples + shape
-│ model (reconstruction_│  features + predicted SOH → full discharge curve
-│ model_*_v10_knee.pkl) │  (57 checkpoints spanning 0-100% of capacity)
-└───────────┬───────────┘
-            │
-            ▼
-   Complete global discharge curve + detected knee point
+┌────────────────────────────┐
+│ Per-module SOH model       │  9 module-level feature rows (voltage drop,
+│ (module_soh_model_*.pkl)   │  cell imbalance, dV/dAh shape, sibling rank
+│                             │  relative to the pack's other 8 modules) →
+│                             │  predicted SOH% per module
+└─────────────┬───────────────┘
+              │ weakest module = min(predicted SOH across the 9)
+              ▼
+┌────────────────────────────┐
+│ Tiered capacity            │  measured (if the module's curve reaches the
+│ extrapolation               │  target cutoff) → self-extrapolated exponential
+│ (module_capacity_           │  decay → cross-module shape-transfer fallback
+│ extrapolation.py)           │  → capacity/SOH at 3.2V AND 2.5V, from the SFT
+└─────────────┬───────────────┘  (predicted) and the FFT (actual ground truth)
+              │
+              ▼
+┌────────────────────────────┐
+│ Curve reconstruction       │  predicted head (0 → SFT start) + observed SFT
+│ (reconstruct_full_curve,   │  tail + extrapolated tail past the SFT, stitched
+│  in app.py)                 │  into one complete 0→depleted curve
+└─────────────┬───────────────┘
+              ▼
+   Weakest-module voltage curve plot: predicted vs actual, both cutoffs marked
 ```
 
-Two **separate models are trained per C-rate** (0.3C and 1.0C) for both parts, because discharge current strongly shapes the curve (see [Key findings](#key-findings-from-the-data) below).
+Two **separate module SOH models are trained per C-rate** (0.3C and 1.0C), because discharge current strongly shapes the curve (IR-drop sag scales with current — see `physics_calibration.py`).
 
 ## Key concepts
 
-- **SOH formula**: `SOH % = (actual_capacity_delivered_Ah / NOMINAL_CAPACITY) * 100`, where `NOMINAL_CAPACITY = 156.0 Ah`. Actual capacity is the pack's measured `AHDischarge` at the end of a full discharge. This replaced an earlier hardcoded per-pack lookup table.
-- **The "complete global curve"**: the model predicts voltage at 57 fixed checkpoints spanning the *entire* discharge (0–100% of total capacity), not just the portion missing from a short test. Earlier versions only reconstructed the missing head segment and spliced it onto the real short-test data.
-- **The discharge knee**: the point of sharpest voltage drop near the end of discharge. Detected via a chord-distance method — the point in the last half of the curve with maximum perpendicular distance from the straight line connecting that window's endpoints (a standard "elbow detection" technique).
-- **Pack configuration**: 108 series-connected cells, 16 temperature sensors (see raw CSV columns below).
-
-## Key findings from the data
-
-These were empirically measured from the real pack data and directly shaped the model design:
-
-| Finding | Value | Where it's used |
-|---|---|---|
-| Initial IR-drop at start of discharge (first 1% of capacity) | ~30mV @ 0.3C vs ~130–150mV @ 1.0C (4–5x sharper under load) | Synthetic curve generation (`EXTRA_IR_DROP_PER_SOH_POINT`) |
-| Discharge knee location | ~83–92% of total capacity, for both C-rates | Checkpoint/sampling density allocation, knee-region diagnostics |
-| Real pack SOH range | ~86.7%–95.9% across 5 packs | Synthetic data extrapolates down to an 80% SOH floor |
+- **SOH formula**: `SOH % = (capacity_Ah / NOMINAL_CAPACITY) * 100`, where `NOMINAL_CAPACITY = 156.0 Ah`.
+- **Weakest module = pack bottleneck**: in a series string, pack-level `AHDischarge` numerically equals the weakest module's own capacity. This is why the module SOH model's headline "pack SOH" is `min()` across its 9 module predictions, not an average.
+- **Two voltage cutoffs, one pass**: 3.2V (a partial/usable-range cutoff) and 2.5V (near-total depletion, essentially where the FFT test itself stops) are both computed from a single tiered-extrapolation call — no need to pick one upfront.
+- **SFT Ah-axis offset**: SFT files are tail-only captures — their `AHDischarge` is zeroed at wherever that short test happened to start, not at full charge. Every module-level SFT computation anchors on that module's own predicted capacity (`ah_offset = predicted_capacity - sft_local_span`) to align the local axis to the true global one.
+- **IR-drop/relaxation transient**: SFT tests start from a rested state, producing a brief, real (not noise) sharp voltage sag that settles into the normal gentle plateau slope. `curve_utils.detect_settle_index` trims this before using SFT data as a curve-reconstruction anchor, so the predicted/observed join doesn't show an artificial spike.
+- **Synthetic augmentation is physics-informed, not template-copying**: `synthetic_module_generator.py` builds independently-sampled *new* 108-cell virtual-pack curves (own capacity, knee timing, IR-sag, cell imbalance — all drawn from ranges measured in `physics_calibration.py`) rather than perturbing one real template's feature row. Every physical constant it samples from (plateau voltage, voltage span, IR-sag magnitude, knee-fraction range, cell imbalance) is measured from the real data, not hardcoded.
 
 ## Directory structure
 
 ```
 new_tech/
-├── app.py                        # Flask web app (the interactive demo)
-├── templates/index.html          # Web UI
-├── curve_train.py (TEST_CASE/)   # Trains the curve-reconstruction models
-├── SOH_MODELS_TRAIN.PY (TEST_CASE/) # Trains the SOH/capacity models
-├── daignos.py (TEST_CASE/)       # Same-session diagnostic: per-checkpoint error table
-├── curve_test.py                 # Standalone end-to-end validation script (plots + MAE)
-├── soh_calculate.py               # One-off: computes actual SOH per file from FFCT capacity
-├── plot_fft.py, side_by_side.py, data_overview.py  # Ad-hoc plotting/exploration utilities
-├── fft_raw_data/                 # Real FULL discharge tests (FFCT) — training ground truth
-├── stf_raw_data/                 # Real SHORT discharge tests (SFT/SFCT) — simulated field input
-├── raw_dataset/                  # Combined raw copy of fft_raw_data + stf_raw_data
-├── clean_data_for_test/          # Newer cleaned data batch (includes pk6, not yet in fft/stf split)
-├── TEST_CASE/                    # Trained model artifacts + their training/eval scripts
-│   ├── soh_model_{0_3c,1_0c}.pkl
-│   ├── feature_names_{0_3c,1_0c}.pkl
-│   └── reconstruction_model_{0_3C,1_0C}_v10_knee.pkl
-└── uploads/                      # Flask upload scratch folder
+├── app.py                              # Flask web app (the interactive demo) — the only entry point
+│                                        # that matters for live serving
+├── templates/index.html                # Web UI
+├── clean_data_for_test/OneDrive_.../   # THE active training data folder (all 6 packs, both C-rates)
+├── raw_dataset/                        # Newly-added raw files awaiting cleaning (see new_raw_file.py)
+├── uploads/                            # Flask upload scratch folder
+│
+├── TEST_CASE/                          # All training/validation code + trained model artifacts
+│   ├── curve_utils.py                  # Shared low-level utilities (curve extraction, feature
+│   │                                    # extraction, knee/settle detection) — imported everywhere
+│   ├── module_capacity_extrapolation.py# Tiered (measured/self-extrapolated/cross-module) capacity
+│   │                                    # estimation at arbitrary target voltages
+│   ├── build_module_dataset.py         # Real per-module capacity/SOH ground-truth table
+│   ├── physics_calibration.py          # Single source of truth for every real-data-measured
+│   │                                    # constant the synthetic generator uses
+│   │
+│   ├── module_soh_train.py             # ★ Trains module_soh_model_{0_3c,1_0c}.pkl — the PRIMARY,
+│   │                                    #   currently-deployed per-module SOH model
+│   ├── synthetic_module_generator.py   # Physics-informed synthetic module data (default augmentation)
+│   ├── curve_train.py                  # Trains reconstruction_model_{0_3C,1_0C}_v10_knee.pkl
+│   ├── SOH_MODELS_TRAIN.PY             # Trains soh_model_{0_3c,1_0c}.pkl — legacy pack-level
+│   │                                    #   fallback, used only if module analysis is unavailable
+│   │
+│   ├── validate_module_extrapolation.py     # Acceptance gate for the tiered capacity method
+│   ├── validate_synthetic_module_generator.py # Acceptance gate for the synthetic generator
+│   │                                             # (distributional sanity + generalization + LOPO)
+│   ├── visualize_synthetic_vs_real.py  # Visual overlay: synthetic vs real discharge curves,
+│   │                                    # per C-rate — catches shape/level issues the statistical
+│   │                                    # gate alone can miss
+│   │
+│   └── *.pkl                           # Trained model artifacts (see Models below)
+│
+└── new_raw_file.py (project root)      # Cleans a raw pack CSV down to just the real discharge
+                                         # window (drops pre-test charge/rest and post-test rest)
 ```
 
 ## Data format
@@ -85,37 +110,38 @@ LoadUnitCurrent, LoadUnitVoltage, LoadUnitPower, SoC, PackCurrent,
 isolation_resistance, min_v
 ```
 
+108 cells = 9 modules × 12 cells each. `min_v` is the row-wise min across all 108 `Cell NNN` columns.
+
 Filenames encode pack ID, test type, and C-rate, e.g.:
 `pk1-62-08062021-FFCT-0.3C 202605151215 Characterisation Test.csv`
 `pk4-60pc-29052021-SFCT-1.0C 202606110707 Characterisation Test.csv`
 
 - `pkN` — pack identifier
-- `FFCT`/`FFT` — full characterization test (used as ground truth / full-curve training target)
+- `FFCT`/`FFT` — full characterization test (ground truth / full-curve)
 - `SFT`/`SFCT` — short (function) test (simulates the field input)
 - `0.3C` / `0.95C` / `1.0C` — discharge C-rate (0.95C is treated as 1.0C throughout)
 
-All curve extraction filters to the valid discharge window (`2.0V < mean cell voltage < 4.15V`) and re-zeros `AHDischarge` to start at 0 for each curve.
+All curve extraction filters to the valid discharge window (`2.0V < mean cell voltage < 4.15V`) and re-zeros `AHDischarge` to start at 0 for each curve (`curve_utils.extract_and_resample_curve`).
 
 ## Models
 
-### Part 1 — SOH / capacity model (`TEST_CASE/soh_model_{0_3c,1_0c}.pkl`)
+### Module SOH model (`TEST_CASE/module_soh_model_{0_3c,1_0c}.pkl`) — primary
 
-- **Algorithm**: XGBRegressor (300 trees, depth 3), one independent model per C-rate.
-- **Input** (19 features, listed in `feature_names_{0_3c,1_0c}.pkl`): start/end voltage, voltage drop (raw and C-rate normalized), cell-to-cell imbalance stats, temperature mean/rise, `delta_Ah` (raw and normalized), dV/dAh mean/std/min, C-rate, `is_sfct` flag, slice start percentage.
-- **Output**: predicted SOH (%). Capacity = `(SOH / 100) * 156`.
-- **Validation**: Leave-One-Pack-Out cross-validation (trains on 4 packs, tests on the 5th, rotated).
-- **Trained by**: `TEST_CASE/SOH_MODELS_TRAIN.PY`.
+- **Algorithm**: XGBRegressor (300 trees, depth 3, L1/L2 regularized), one independent model per C-rate.
+- **Input**: per-module voltage/shape features (start/end voltage, voltage drop, cell imbalance, dV/dAh mean/std/min, `ah_per_voltage_drop`) plus sibling features (`rel_end_voltage`, `sibling_rank` — this module vs. its own pack's other 8) plus C-rate/slice metadata. `pack_id` and `module_idx` are never features.
+- **Training data**: real module rows (every real file, sliced at multiple depths including the exact whole-file slice the live app sends) + synthetic module rows (`synthetic_module_generator.py`, physics-informed, real weight 1.0 vs synthetic weight 0.4).
+- **Validation**: Leave-One-Pack-Out (all 9 of a pack's modules held out together) + a live end-to-end pipeline test (upload real SFT+FFT pairs through the actual Flask route) — LOPO alone has repeatedly missed real regressions in this project (e.g. a train/serve feature mismatch that LOPO's in-distribution sampling couldn't see), so both are required before deploying a retrain.
+- **Trained by**: `TEST_CASE/module_soh_train.py`.
 
-### Part 2 — Curve reconstruction model (`TEST_CASE/reconstruction_model_{0_3C,1_0C}_v10_knee.pkl`)
+### Curve reconstruction (`TEST_CASE/reconstruction_model_{0_3C,1_0C}_v10_knee.pkl`)
 
-- **Algorithm**: `MultiOutputRegressor` wrapping XGBRegressor (600 trees, depth 5, lr 0.015) — effectively **57 independent regressors**, one per output checkpoint.
-- **Input** (69 features): 53 real voltage samples of the observed short-test segment (non-uniformly spaced — original ~2.5% density kept everywhere, doubled density in the last ~34% of the segment where the knee usually falls) + SOH + slope/curvature/plateau/imbalance summary stats + explicit knee-location features (`tail_knee_pct`, `tail_knee_slope`) + the Ah offset where the short-test segment sits within the full curve.
-- **Output** (57 checkpoints): voltage at fixed percentages of total capacity (0–100%), non-uniformly spaced the same way — original 2.5% density everywhere, extra density at the very start (initial IR-drop) and from 71.25–100% (discharge knee).
+- Reconstructs the complete 0→100%-capacity mean-cell-voltage curve from a short-test segment, used for the weakest module's predicted-head visualization and pack-level knee detection.
 - **Trained by**: `TEST_CASE/curve_train.py`.
 
-### Training data construction
+### Legacy pack-level SOH model (`TEST_CASE/soh_model_{0_3c,1_0c}.pkl`) — fallback only
 
-For each real FFCT (full curve), the training script simulates a short test by cutting the curve at 12 different points (20%–75% of capacity) — everything after the cut is the "observed" input, the full curve (at the 57 checkpoints, spanning 0–100%) is the prediction target. On top of the ~20 real curves, synthetic curves are generated by rescaling a real curve to a lower target SOH (down to an 80% floor) and adding a C-rate-specific extra IR sag proportional to how far below the template's own SOH we're extrapolating — giving ~800 training rows per C-rate.
+- Used only when an uploaded SFT file is too short to extract all 9 modules' features (module analysis unavailable). Predicts pack-level SOH directly rather than per-module.
+- **Trained by**: `TEST_CASE/SOH_MODELS_TRAIN.PY`.
 
 ## Setup
 
@@ -124,7 +150,7 @@ For each real FFCT (full curve), the training script simulates a short test by c
 pip install xgboost scikit-learn pandas numpy scipy joblib flask matplotlib
 ```
 
-> This project was developed/tested against the `ai_guru` conda environment on this machine (the default `base` env doesn't have `xgboost` installed).
+> Developed/tested against the `ai_guru` conda environment on this machine (the base env doesn't have `xgboost`).
 
 ## Usage
 
@@ -136,51 +162,32 @@ python app.py
 # open http://127.0.0.1:5000
 ```
 
-Upload a short-test CSV (SFT/SFCT) and its corresponding full-test CSV (FFCT, used only for ground-truth comparison in the UI), pick a voltage cutoff, and click **Analyze Battery**. The dashboard shows:
-
-- Predicted vs actual SOH and capacity
-- Reconstruction MAE (mV)
-- Capacity remaining at the chosen voltage cutoff
-- **Predicted vs actual discharge knee point** (Ah), with the location error, and both marked with stars on the curve plot
-- The full overlay plot: real FFCT curve vs. the ML-reconstructed complete global curve
+Upload a short-test CSV (SFT/SFCT) and its corresponding full-test CSV (FFCT, used as ground truth). The dashboard shows the weakest module (predicted vs actual), its capacity/SOH at 3.2V and 2.5V (predicted vs actual), and a plot of its voltage curve — predicted head + observed SFT + extrapolated tail, against the real FFT ground truth.
 
 ### Retrain the models
 
 ```bash
 cd new_tech/TEST_CASE
-python SOH_MODELS_TRAIN.PY   # trains soh_model_{0_3c,1_0c}.pkl
+python module_soh_train.py   # trains module_soh_model_{0_3c,1_0c}.pkl -- the primary model
 python curve_train.py        # trains reconstruction_model_{0_3C,1_0C}_v10_knee.pkl
+python SOH_MODELS_TRAIN.PY   # trains soh_model_{0_3c,1_0c}.pkl -- legacy fallback only
 ```
 
-Both read from `../fft_raw_data` by default (only FFCT/FFT-labeled files are used for curve training; the SOH trainer filters similarly).
+`module_soh_train.py` reads from `clean_data_for_test/OneDrive_1_7-9-2026_CLEANED/` by default. **The Flask app only loads models at process startup — restart `app.py` after any retrain, or it will keep silently serving the old model from memory.**
 
-### Run diagnostics
+### Run validation gates
 
 ```bash
 cd new_tech/TEST_CASE
-python daignos.py
+python validate_module_extrapolation.py       # tiered capacity-extrapolation accuracy
+python validate_synthetic_module_generator.py # synthetic generator: distributional sanity,
+                                                # synthetic-only generalization, blended LOPO
+python visualize_synthetic_vs_real.py          # saves synthetic_vs_real_{0_3C,1_0C}.png --
+                                                # visual sanity check the statistical gates can miss
 ```
 
-Slices every real FFCT file at a fixed 50% cutoff and reports per-checkpoint average/max error (mV), plus a knee-region (72–100%) summary. This measures accuracy under training-like conditions (the "tail" comes from the same curve being predicted).
+## Known limitations
 
-```bash
-cd new_tech
-python curve_test.py
-```
-
-A harder, more realistic end-to-end test: predicts SOH from a **real, independently-recorded** short-test file, reconstructs the full curve, and validates against that pack's **real** FFCT file. Displays an overlay plot and prints MAE/RMSE.
-
-## Known limitation: cross-session generalization
-
-The reconstruction model is trained by slicing **one** real FFCT curve into an "observed tail" + "target," so both halves always come from the same recording. In production, the observed short test and the full test it's validated against are **two independently-run sessions** on the same pack — which can differ slightly in starting rest voltage, temperature, and other conditions that a same-curve-slice training setup never exposes the model to.
-
-Testing against genuine SFT-vs-FFCT file pairs (rather than same-curve slices) shows this gap: errors are noisier and occasionally much larger (tens of mV) than the same-session diagnostic suggests, for both old and current model versions. This is a separate, deeper issue from checkpoint/knee resolution — fixing it would mean training on real matched short-test/full-test pairs (only a handful exist per C-rate today) blended in alongside the simulated slices, rather than relying on simulated slices alone.
-
-## Model version history
-
-| Version | Change |
-|---|---|
-| v7 | Predicts only the missing head segment (percentage-of-head checkpoints), splices onto the real observed tail |
-| v8 | Predicts the complete global curve (checkpoints as % of total capacity) instead of just the head; SOH switched from a hardcoded per-pack table to the `capacity/156*100` formula; synthetic data added down to an 80% SOH floor with C-rate-specific IR-drop modeling |
-| v9 | *(superseded — reallocating checkpoint density away from the mid-curve plateau toward the knee region regressed cross-session accuracy; not shipped)* |
-| v10 | Fixed a bug where the short-test input samples were a straight line between the segment's first/last voltage instead of the actual observed curve; added explicit knee-location features (`tail_knee_pct`, `tail_knee_slope`); added knee-region resolution **additively** on top of the original density, rather than reallocating it |
+- **Data scarcity**: only 6 real packs. A shared, shallow (regularized) tree model has limited capacity to fit one pack's narrow SOH range without affecting predictions for other packs nearby in feature space — reweighting one pack's data to fix its calibration reliably costs a little accuracy on its closest real neighbor. Fixing this for real needs either more real packs or a two-stage architecture (separate ranking model from absolute-level model), not further data-reweighting.
+- **Ranking is only as reliable as the true margin**: for a pack whose weakest and 2nd-weakest modules are genuinely nearly tied in real SOH (sub-0.1-point margins, occasionally exact ties given the extrapolation method's own precision), which one a model calls "weakest" is close to a coin flip — this is a property of the pack's actual physical balance, not a model defect.
+- **Curve-shape fidelity ≠ prediction accuracy**: a synthetic-generator fix that measurably improved how closely synthetic curves visually/statistically match real ones did not automatically improve live SOH-prediction accuracy in testing — the two are related but distinct things to validate.

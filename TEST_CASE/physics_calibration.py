@@ -102,7 +102,21 @@ def calibrate(data_folder=DEFAULT_DATA_FOLDER, force=False):
         pack_soh = compute_soh(ah[-1])
 
         sag = _measure_initial_ir_sag_v(ah, pack_v)
-        if sag is not None:
+        # Physically, an initial-of-discharge IR sag can't be negative (a
+        # rested pack's voltage only drops as current ramps up, never rises
+        # by a meaningful amount) and shouldn't plausibly exceed ~0.5V given
+        # every other real pack measures 0.03-0.17V. Caught via a visual
+        # synthetic-vs-real curve overlay: pk6's 0.3C file measured -1.09V --
+        # a single resampling-edge-case artifact (extract_and_resample_curve's
+        # mask+sort lets one anomalous low-voltage row from the raw file sort
+        # to ah=0 ahead of the real plateau readings), not a real sag -- which
+        # alone flipped the through-origin fit's slope negative and inflated
+        # its residual std to 432mV (vs 1.0C's clean 27mV), causing the
+        # synthetic generator to occasionally sample a huge, physically
+        # nonsensical sag that crashed a curve's voltage far too early.
+        # Filtering here fixes the calibration without touching
+        # extract_and_resample_curve, which is shared by the whole pipeline.
+        if sag is not None and 0.0 <= sag <= 0.5:
             ir_sag_rows[bucket].append((100.0 - pack_soh, sag))
 
         heterogeneity_mv.append(_measure_pack_heterogeneity_mv(modules))

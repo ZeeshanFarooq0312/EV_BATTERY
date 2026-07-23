@@ -187,6 +187,24 @@ def generate_virtual_pack_dataframe(c_rate_name, rng, data_folder=DEFAULT_DATA_F
         ir_sag = pc.sample_ir_sag_v(c_rate_name, soh_deficit, rng, data_folder)
         # Sag fades in over the first ~5% of capacity rather than existing at
         # ah=0, mirroring curve_train.py's IR_DROP_DECAY_FRACTION mechanism.
+        #
+        # NOTE: a rise-THEN-decay version was tried (fading the sag back to
+        # ~0 over the following ~15% of capacity, instead of holding at
+        # ir_sag for the rest of the discharge) -- ir_sag is measured from a
+        # genuinely brief initial transient (_measure_initial_ir_sag_v), so
+        # holding it forever is architecturally a mismatch, and a real-vs-
+        # synthetic visual overlay confirmed the fix: the growing real-vs-
+        # synthetic voltage gap (0.064V@40Ah -> 0.082V@120Ah at 0.3C;
+        # 0.158V->0.196V at 1.0C) shrank ~5x (to 0.02-0.05V, roughly flat)
+        # and no longer grew with capacity. But the actual retrained,
+        # deployed model got WORSE on the live end-to-end pack test after
+        # that change -- not a single coin-flip case, but a broad ~0.2pt
+        # mean|gap| regression across several packs (pk1-1.0C, pk4-1.0C,
+        # pk6 both rates) -- so it was reverted here to match what's actually
+        # deployed. Better curve-shape fidelity didn't translate to better
+        # SOH prediction accuracy this time; worth retrying alongside fixing
+        # sample_knee_fraction's C-rate-pooled (not bucketed) calibration,
+        # which may be a confounding factor.
         decay_window = 0.05 * cap_m
         sag_profile = ir_sag * (1.0 - np.exp(-ah / (decay_window + 1e-6)))
 
