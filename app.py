@@ -448,7 +448,7 @@ def analyze():
             ah_global_settled = ah_offset + (ah_settled - sft_mod_ah[0])
             pred_tail_ah_global = ah_offset + pred_tail_ah
             plt.figure(figsize=(10, 6))
-            plt.plot(fft_mod_ah, module_v_fft, label='Real FFT (Ground Truth)', color='#64748b', linewidth=2.5, alpha=0.85)
+            # plt.plot(fft_mod_ah, module_v_fft, label='Real FFT (Ground Truth)', color='#64748b', linewidth=2.5, alpha=0.85)
             if len(head_ah) > 0:
                 plt.plot(head_ah, head_v, label='Predicted Head (0 → SFT start, approximate)',
                          color='#16a34a', linewidth=2, linestyle=':')
