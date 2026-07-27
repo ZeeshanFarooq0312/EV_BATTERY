@@ -276,10 +276,11 @@
 
         .module-bar-value {
             font-size: 0.8rem;
-            width: 58px;
+            width: 118px;
             text-align: right;
             color: var(--text-main);
             font-variant-numeric: tabular-nums;
+            white-space: nowrap;
         }
 
         .module-weakest-badge {
@@ -402,7 +403,8 @@
             <p style="color: var(--text-muted); margin-top: -10px; margin-bottom: 15px;">
                 Splits the pack's 108 cells into its 9 modules (12 cells each). "Predicted" comes from the
                 uploaded SFT file via the module SOH model; "Actual" is measured or estimated directly from
-                the uploaded FFT file's full discharge curve. Hover a bar for the exact value.
+                the uploaded FFT file's full discharge curve. Each bar shows SOH% and capacity (Ah); hover
+                for the source.
             </p>
             <div class="module-legend">
                 <div class="module-legend-item"><span class="module-legend-swatch" style="background:#2563eb;"></span>Actual (from FFT)</div>
@@ -488,8 +490,9 @@
                 const actualPct = m.actual_soh !== null ? Math.max(0, (m.actual_soh - domainMin) / span * 100) : 0;
                 const predPct = m.predicted_soh !== null ? Math.max(0, (m.predicted_soh - domainMin) / span * 100) : 0;
                 const actualTitle = m.actual_soh !== null
-                    ? `Actual SOH: ${m.actual_soh}% (${m.label_source || 'n/a'})` : 'Actual SOH: n/a';
-                const predTitle = m.predicted_soh !== null ? `Predicted SOH: ${m.predicted_soh}%` : 'Predicted SOH: n/a';
+                    ? `Actual SOH: ${m.actual_soh}% / ${m.actual_capacity}Ah (${m.label_source || 'n/a'})` : 'Actual SOH: n/a';
+                const predTitle = m.predicted_soh !== null
+                    ? `Predicted SOH: ${m.predicted_soh}% / ${m.predicted_capacity}Ah` : 'Predicted SOH: n/a';
 
                 let badges = '';
                 if (isWeakestActual) badges += '<span class="module-weakest-badge">WEAKEST</span>';
@@ -501,13 +504,13 @@
                         <div class="module-bar-track" title="${actualTitle}">
                             <div class="module-bar-fill" style="width:${actualPct}%; background-color:#2563eb;"></div>
                         </div>
-                        <div class="module-bar-value">${m.actual_soh !== null ? m.actual_soh.toFixed(2) + '%' : '--'}</div>
+                        <div class="module-bar-value">${m.actual_soh !== null ? m.actual_soh.toFixed(2) + '% · ' + m.actual_capacity.toFixed(2) + 'Ah' : '--'}</div>
                     </div>
                     <div class="module-bar-group">
                         <div class="module-bar-track" title="${predTitle}">
                             <div class="module-bar-fill" style="width:${predPct}%; background-color:#dc2626;"></div>
                         </div>
-                        <div class="module-bar-value">${m.predicted_soh !== null ? m.predicted_soh.toFixed(2) + '%' : '--'}</div>
+                        <div class="module-bar-value">${m.predicted_soh !== null ? m.predicted_soh.toFixed(2) + '% · ' + m.predicted_capacity.toFixed(2) + 'Ah' : '--'}</div>
                     </div>
                 `;
                 rowsContainer.appendChild(row);

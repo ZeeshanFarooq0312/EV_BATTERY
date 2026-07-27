@@ -458,7 +458,7 @@ def analyze_modules(sft_df, fft_df, c_rate):
         if idx is not None:
             tier0[m] = _interp_crossing_ah(ah, traces['min_v'], idx, cutoff_v)
 
-    actual, label_source = {}, {}
+    actual, actual_capacity, label_source = {}, {}, {}
     if tier0:
         weakest_module = min(tier0, key=tier0.get)
         template_v = modules[weakest_module]['min_v']
@@ -470,12 +470,15 @@ def analyze_modules(sft_df, fft_df, c_rate):
                     ah, traces['min_v'], cutoff_v, template_ah=ah, template_v=template_v,
                 )
             actual[m] = compute_soh(capacity_ah)
+            actual_capacity[m] = capacity_ah
             label_source[m] = source
 
     modules_result = [{
         'module_idx': m,
         'predicted_soh': round(predicted[m], 2) if m in predicted else None,
         'actual_soh': round(actual[m], 2) if m in actual else None,
+        'predicted_capacity': round(predicted[m] / 100.0 * NOMINAL_CAPACITY, 2) if m in predicted else None,
+        'actual_capacity': round(actual_capacity[m], 2) if m in actual_capacity else None,
         'label_source': label_source.get(m),
     } for m in range(1, N_MODULES + 1)]
 

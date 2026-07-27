@@ -94,6 +94,25 @@ def build_canonical_shape(c_rate_name, data_folder=DEFAULT_DATA_FOLDER, n_points
         if span <= 0:
             continue
         normalized = (v - plateau) / span
+        # NOTE: pk6's 0.3C file has a known extract_and_resample_curve
+        # mask+sort artifact (a single anomalous low-voltage row sorts to
+        # ah=0 ahead of the real plateau readings -- same root cause already
+        # documented/filtered in calibrate()'s ir_sag measurement, where it
+        # showed as sag=-1.09V). Here it makes normalized[0]=-1.00 for that
+        # one curve, dragging the 6-curve average at grid=0 from ~0.5 down to
+        # 0.26 -- a visually confirmed, physically-impossible dip-then-rise
+        # at the start of every synthetic curve for that C-rate bucket.
+        # Filtering it out (`if curve_on_grid[0] < 0: continue`) was tried:
+        # confirmed via a synthetic-vs-real overlay that it fixes the shape,
+        # and 1.0C's LOPO was unaffected (that bucket has no corrupted file)
+        # -- but retraining module_soh_model on the corrected shape dropped
+        # the live 11-case weakest-module ranking 10/11->8/11 (pk3-0.3C,
+        # pk4-0.3C newly wrong) despite flat-to-slightly-better LOPO and mean
+        # SOH-gap accuracy. Reverted along with the persisting-sag fix below
+        # for the same reason: with only 6 real packs, near-tied modules'
+        # rankings are sensitive to synthetic-data composition in ways LOPO's
+        # average error doesn't capture -- do not re-attempt without a
+        # live-pipeline-validated reason.
         curves.append(np.interp(grid, frac, normalized))
 
     if not curves:
@@ -188,23 +207,26 @@ def generate_virtual_pack_dataframe(c_rate_name, rng, data_folder=DEFAULT_DATA_F
         # Sag fades in over the first ~5% of capacity rather than existing at
         # ah=0, mirroring curve_train.py's IR_DROP_DECAY_FRACTION mechanism.
         #
-        # NOTE: a rise-THEN-decay version was tried (fading the sag back to
-        # ~0 over the following ~15% of capacity, instead of holding at
-        # ir_sag for the rest of the discharge) -- ir_sag is measured from a
-        # genuinely brief initial transient (_measure_initial_ir_sag_v), so
-        # holding it forever is architecturally a mismatch, and a real-vs-
-        # synthetic visual overlay confirmed the fix: the growing real-vs-
-        # synthetic voltage gap (0.064V@40Ah -> 0.082V@120Ah at 0.3C;
-        # 0.158V->0.196V at 1.0C) shrank ~5x (to 0.02-0.05V, roughly flat)
-        # and no longer grew with capacity. But the actual retrained,
-        # deployed model got WORSE on the live end-to-end pack test after
-        # that change -- not a single coin-flip case, but a broad ~0.2pt
-        # mean|gap| regression across several packs (pk1-1.0C, pk4-1.0C,
-        # pk6 both rates) -- so it was reverted here to match what's actually
-        # deployed. Better curve-shape fidelity didn't translate to better
-        # SOH prediction accuracy this time; worth retrying alongside fixing
-        # sample_knee_fraction's C-rate-pooled (not bucketed) calibration,
-        # which may be a confounding factor.
+        # NOTE: a rise-THEN-decay-to-ZERO version was tried previously (fading
+        # the sag back to ~0 over the following ~15% of capacity, instead of
+        # holding at ir_sag for the rest of the discharge) -- it shrank the
+        # growing real-vs-synthetic gap (0.064V@40Ah->0.082V@120Ah at 0.3C;
+        # 0.158V->0.196V at 1.0C) ~5x, but the retrained deployed model got
+        # WORSE on the live pipeline (~0.2pt mean|gap| regression). REVERTED.
+        #
+        # A second attempt (smaller, real-data-calibrated persisting sag via
+        # physics_calibration.sample_persisting_sag_v -- 0.0025-0.0043 V/pt,
+        # measured directly from real mid-discharge voltage vs degradation,
+        # instead of reusing ir_sag_fit's 0.0053-0.0155 V/pt initial-transient
+        # slope) was ALSO tried and ALSO reverted: live pipeline match rate
+        # dropped 10/11->9/11 and mean|gap SOH| nearly doubled (0.32->0.61),
+        # including making pk4-1.0C -- the case this was meant to fix -- worse
+        # (0.47->1.76). Two independent attempts at "more physically accurate
+        # sag" both hurt live accuracy despite LOPO looking fine or better; the
+        # model appears to rely on this deliberately-oversized sag as a
+        # stronger degradation-vs-voltage training signal, not a bug to fix.
+        # Left as ir_sag (the original, empirically-deployed value) --
+        # do not re-attempt without a live-pipeline-validated reason.
         decay_window = 0.05 * cap_m
         sag_profile = ir_sag * (1.0 - np.exp(-ah / (decay_window + 1e-6)))
 

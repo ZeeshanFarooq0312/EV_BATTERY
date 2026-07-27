@@ -83,6 +83,12 @@ def calibrate(data_folder=DEFAULT_DATA_FOLDER, force=False):
     # its own real data was added to training -- the model had almost no
     # signal that these shape features move at all with degradation.
     shape_rows = {'0.3C': [], '1.0C': []}
+    # (soh_deficit_points, voltage at ~50% capacity) per module -- fits how
+    # much the PERSISTING mid-discharge voltage level actually drops per
+    # degradation point, as distinct from ir_sag_fit above (which measures
+    # only the fast INITIAL transient over the first 1% of capacity). See
+    # persisting_sag_fit below for why these two must not be conflated.
+    voltage_level_rows = {'0.3C': [], '1.0C': []}
     # (plateau_v, span_v) per real full-curve file, per C-rate bucket --
     # synthetic_module_generator.py previously sampled these from hardcoded
     # guesses (plateau ~3.45-3.75V, span ~1.0-1.4V) completely independent of
@@ -158,6 +164,11 @@ def calibrate(data_folder=DEFAULT_DATA_FOLDER, force=False):
                 structural_rows[bucket].append((100.0 - soh, f['max_cell_spread_at_end'], f['mean_cell_imbalance_std']))
                 shape_rows[bucket].append((100.0 - soh, f['ah_per_voltage_drop'], f['mean_dV_dAh'],
                                             f['std_dV_dAh'], f['min_dV_dAh']))
+                # late_slice starts at 50% of the file, so f['start_voltage']
+                # (mean of its own first 10 rows) is this module's voltage at
+                # ~50% capacity delivered -- squarely inside the 40%-70%
+                # window SLICE_PCTS actually samples for training features.
+                voltage_level_rows[bucket].append((100.0 - soh, f['start_voltage']))
 
         cutoff_v = float(df[cell_cols].min(axis=1).iloc[-1])
         for m in range(1, N_MODULES + 1):
@@ -202,6 +213,33 @@ def calibrate(data_folder=DEFAULT_DATA_FOLDER, force=False):
     imbalance_range = {b: (float(np.percentile(vals, 5)), float(np.percentile(vals, 95)))
                         for b, vals in imbalance_mv.items() if vals}
 
+    # generate_virtual_pack_dataframe applies its sag_profile as a PERSISTING
+    # depression (rises over the first ~5-20% of capacity, then holds for
+    # the rest of the discharge) -- it was reusing ir_sag_fit's slope for
+    # this, which measures something physically different (the fast initial
+    # transient over just the first 1% of capacity). Measured directly: real
+    # mid-discharge (~50%) voltage drops only 0.0025-0.0043 V per SOH-deficit
+    # point, vs ir_sag_fit's 0.0053-0.0155 V/pt -- i.e. the persisting sag was
+    # 2-3.6x too large, sitting synthetic curves systematically ~0.1-0.2V
+    # below real ones across most of the discharge (confirmed on a
+    # synthetic-vs-real per-module overlay). Free-intercept fit (like
+    # structural/shape_growth_fit above), since only the SLOPE is consumed --
+    # the intercept (a hypothetical 0-deficit module's absolute voltage
+    # level) is irrelevant, sample_plateau_v already supplies that baseline.
+    persisting_sag_fit = {}
+    for bucket, rows in voltage_level_rows.items():
+        if len(rows) < 5:
+            continue
+        x = np.array([r[0] for r in rows])
+        y = np.array([r[1] for r in rows])
+        A = np.vstack([x, np.ones_like(x)]).T
+        slope, intercept = np.linalg.lstsq(A, y, rcond=None)[0]
+        resid_std = float(np.std(y - (slope * x + intercept)))
+        # Real degradation depresses voltage (slope <= 0 expected); clip a
+        # noise-driven sign flip to 0 rather than let sag go negative (which
+        # would mean synthetic voltage RISING with degradation).
+        persisting_sag_fit[bucket] = {'slope': float(max(0.0, -slope)), 'resid_std': max(resid_std, 1e-4), 'n': len(rows)}
+
     structural_growth_fit = {}
     for bucket, rows in structural_rows.items():
         if len(rows) < 5:
@@ -235,6 +273,7 @@ def calibrate(data_folder=DEFAULT_DATA_FOLDER, force=False):
 
     result = {
         'ir_sag_fit': ir_sag_fit,
+        'persisting_sag_fit': persisting_sag_fit,
         'structural_growth_fit': structural_growth_fit,
         'shape_growth_fit': shape_growth_fit,
         'plateau_v_range': plateau_v_range,
@@ -261,6 +300,20 @@ def sample_ir_sag_v(c_rate_name, soh_deficit_points, rng, data_folder=DEFAULT_DA
     around the real-data-regressed (through-origin) slope plus residual noise."""
     cal = calibrate(data_folder)
     fit = cal['ir_sag_fit'].get(c_rate_name, {'slope': 0.02, 'resid_std': 0.005})
+    mean_sag = fit['slope'] * soh_deficit_points
+    return float(max(0.0, mean_sag + rng.normal(0, fit['resid_std'])))
+
+
+def sample_persisting_sag_v(c_rate_name, soh_deficit_points, rng, data_folder=DEFAULT_DATA_FOLDER):
+    """Voltage depression (volts) that PERSISTS through the rest of the
+    discharge for a module `soh_deficit_points` below full -- NOT the same
+    quantity as sample_ir_sag_v (that's the fast initial transient over the
+    first ~1% of capacity only). generate_virtual_pack_dataframe previously
+    reused sample_ir_sag_v's slope for its persisting sag_profile, which is
+    2-3.6x too large relative to what real mid-discharge voltage actually
+    does per degradation point (see persisting_sag_fit in calibrate())."""
+    cal = calibrate(data_folder)
+    fit = cal['persisting_sag_fit'].get(c_rate_name, {'slope': 0.004, 'resid_std': 0.02})
     mean_sag = fit['slope'] * soh_deficit_points
     return float(max(0.0, mean_sag + rng.normal(0, fit['resid_std'])))
 
@@ -342,6 +395,10 @@ if __name__ == "__main__":
     cal = calibrate()
     print("IR sag fit (through-origin: sag_mV = slope * soh_deficit_points):")
     for bucket, fit in cal['ir_sag_fit'].items():
+        print(f"  {bucket}: slope={fit['slope']*1000:.2f} mV/pt  "
+              f"resid_std={fit['resid_std']*1000:.2f} mV  (n={fit['n']})")
+    print("\nPersisting sag fit (mid-discharge depression = slope * soh_deficit_points):")
+    for bucket, fit in cal['persisting_sag_fit'].items():
         print(f"  {bucket}: slope={fit['slope']*1000:.2f} mV/pt  "
               f"resid_std={fit['resid_std']*1000:.2f} mV  (n={fit['n']})")
     print(f"\nHeterogeneity range (mV): {cal['heterogeneity_mv_range']}")
