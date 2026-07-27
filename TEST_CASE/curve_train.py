@@ -58,10 +58,22 @@ CUTOFF_PCTS = [
 POST_KNEE_DECAY_JITTER = (0.7, 1.5)
 
 
-def generate_synthetic_curve(template_ah, template_v, template_cell_std, template_soh, c_rate_name):
+def generate_synthetic_curve(template_ah, template_v, template_cell_std, template_soh, c_rate_name,
+                              post_knee_jitter=POST_KNEE_DECAY_JITTER):
     """Scale a real curve to a new (lower) SOH and add a C-rate specific extra
     IR sag for the portion of degradation beyond what the template itself shows.
-    This keeps synthetic curves shaped like real ones instead of pure noise."""
+    This keeps synthetic curves shaped like real ones instead of pure noise.
+
+    post_knee_jitter: (low, high) range to randomly re-steepen/flatten the
+    post-knee tail, or None to skip this step entirely and just use the
+    template's own (already realistic) tail shape, scaled. Defaults to the
+    module-level POST_KNEE_DECAY_JITTER for backward compatibility with
+    curve_train.py's own pack-mean model, where it's smoothed out across 9
+    averaged modules. module_curve_train.py passes None: its single-module
+    templates are already the steepest real curve available (the pack's
+    weakest module), so re-jittering on top compounds into unrealistically
+    steep, kinked synthetic tails (visible as a slope discontinuity right at
+    the knee) instead of adding useful shape diversity."""
     target_soh = float(np.random.uniform(SYNTHETIC_SOH_FLOOR, template_soh))
     target_total_cap = (target_soh / 100.0) * NOMINAL_CAPACITY
     template_total_cap = template_ah[-1]
@@ -82,11 +94,12 @@ def generate_synthetic_curve(template_ah, template_v, template_cell_std, templat
     # only ever the one recorded shape from whichever real curve was used as
     # the template -- real data has very few genuinely independent examples
     # of this region.
-    knee_idx = detect_knee_index(synth_ah, synth_v)
-    if knee_idx < len(synth_v) - 3:
-        decay_factor = float(np.random.uniform(*POST_KNEE_DECAY_JITTER))
-        knee_v = synth_v[knee_idx]
-        synth_v[knee_idx:] = knee_v - (knee_v - synth_v[knee_idx:]) * decay_factor
+    if post_knee_jitter is not None:
+        knee_idx = detect_knee_index(synth_ah, synth_v)
+        if knee_idx < len(synth_v) - 3:
+            decay_factor = float(np.random.uniform(*post_knee_jitter))
+            knee_v = synth_v[knee_idx]
+            synth_v[knee_idx:] = knee_v - (knee_v - synth_v[knee_idx:]) * decay_factor
 
     noise = np.random.normal(0, 0.004, synth_v.shape)
     synth_v = np.clip(synth_v + noise, 2.0, 4.2)
@@ -95,15 +108,20 @@ def generate_synthetic_curve(template_ah, template_v, template_cell_std, templat
     return synth_ah, synth_v, synth_cell_std, target_soh
 
 
-def build_rows_from_curve(ah, v, cell_std, true_soh):
+def build_rows_from_curve(ah, v, cell_std, true_soh, cutoff_pcts=CUTOFF_PCTS):
     """Slice a full discharge curve at several cutoff points, treating the
     tail after the cutoff as the observed segment (what a short field test
     would see) and the 41 checkpoints across the WHOLE curve as the target -
-    i.e. we reconstruct the complete global curve, not just the missing head."""
+    i.e. we reconstruct the complete global curve, not just the missing head.
+
+    `cutoff_pcts` defaults to this module's own CUTOFF_PCTS (unchanged
+    behavior for existing callers); module_curve_train.py passes a much
+    denser, more complete range since it only has 6 real curves total and
+    benefits from squeezing more distinct input-slice examples out of each."""
     total_cap = ah[-1]
     X_rows, y_rows = [], []
 
-    for cutoff_pct in CUTOFF_PCTS:
+    for cutoff_pct in cutoff_pcts:
         cutoff_ah = float(total_cap * cutoff_pct)
         cutoff_idx = np.searchsorted(ah, cutoff_ah)
         if cutoff_idx < 15 or cutoff_idx >= len(ah) - 20:

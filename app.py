@@ -17,6 +17,73 @@ import matplotlib.pyplot as plt
 
 from flask import Flask, render_template, request, jsonify
 from scipy.interpolate import interp1d
+from scipy.ndimage import gaussian_filter1d, median_filter
+from sklearn.isotonic import IsotonicRegression
+
+
+def _enforce_monotonic_nonincreasing(x, y):
+    """Least-squares monotonic non-increasing fit to (x, y) via isotonic
+    regression (pool-adjacent-violators) -- used to guarantee a reconstructed
+    discharge curve never rises, since voltage cannot increase as cumulative
+    Ah delivered increases. Preferred over a hard np.minimum.accumulate
+    clamp: a clamp FREEZES the sequence flat at the last good value the
+    instant a violation occurs (visible as an unnatural flat "shelf" right
+    before a steep final cliff -- found on pk1 1.0C module 1, where one
+    checkpoint's raw prediction jumped +69mV). Isotonic regression instead
+    pools the violating point(s) with their neighbors and redistributes the
+    correction smoothly across them, which is both a better fit to the raw
+    (mostly-good) predictions and visually smoother.
+
+    NOTE: isotonic regression on its own still leaves a visible flat
+    "shelf" wherever the raw checkpoints have a sizeable local violation --
+    found on pk3 1.0C module 7, where a +46mV bump around ah=40-55 forced a
+    ~15-checkpoint-wide flat patch to reconcile it (each of the 57
+    checkpoints is an independent regressor with no smoothness constraint
+    between neighbors, so this kind of local noise is expected). Callers
+    should smooth the raw predictions (see _smooth_checkpoints) BEFORE
+    calling this, so isotonic has less amplitude to pool away in the first
+    place."""
+    return IsotonicRegression(increasing=False, out_of_bounds='clip').fit_transform(x, y)
+
+
+def _smooth_checkpoints(y, sigma=1.2, tail_protect=5):
+    """Damps local checkpoint-to-checkpoint noise before the isotonic step
+    (see _enforce_monotonic_nonincreasing's docstring).
+
+    Median filter FIRST, then Gaussian: found on pk6 0.3C module 8, where
+    the checkpoint at ah=0 (full-charge voltage, should be the single
+    HIGHEST point on the whole curve) was mispredicted 170mV LOW of the
+    very next checkpoint -- a single-point outlier at the sequence's own
+    boundary. Gaussian smoothing alone barely dents a single sharp outlier
+    (it just spreads a fraction of it onto neighbors), and isotonic
+    regression's pool-adjacent-violators then has to cascade the fix
+    forward across ~30 checkpoints before the (slowly-descending) pooled
+    average finally drops back below the raw curve -- visible as a long,
+    unnaturally flat/near-linear stretch at the start of the curve, exactly
+    the "looks like the old mean-voltage reconstruction" complaint. A
+    median filter (mode='reflect', so it compares an edge point against its
+    mirrored neighbors instead of padding with copies of itself) removes a
+    single-point outlier outright instead of just softening it, so isotonic
+    never sees a violation large enough to need a long cascade.
+
+    tail_protect excludes the last few checkpoints from the median step:
+    found on pk4 0.3C module 7, where the genuine, sharp discharge-knee
+    collapse in the last ~2 checkpoints looks exactly like a single-point
+    outlier to a size-5 median filter (reflect padding compares it against
+    its own flatter neighbors) and gets flattened back toward the mid-curve
+    trend. Combined with MODULE_END_ANCHOR_V forcing only the very last
+    checkpoint back down, this produced a visible "flattens, then suddenly
+    plunges" step instead of one continuous accelerating decline. The head
+    (checkpoint 0) doesn't need this protection: its true signal IS
+    near-constant across packs (see MODULE_START_VOLTAGE), so median
+    filtering it is correct; the tail's true signal is a real acceleration,
+    so median filtering it is not."""
+    if tail_protect > 0 and len(y) > tail_protect:
+        head = median_filter(y[:-tail_protect], size=5, mode='reflect')
+        y = np.concatenate([head, y[-tail_protect:]])
+    else:
+        y = median_filter(y, size=5, mode='reflect')
+    return gaussian_filter1d(y, sigma=sigma, mode='nearest')
 
 warnings.filterwarnings('ignore')
 
@@ -83,6 +150,49 @@ for c_rate in [0.3, 1.0]:
         print(f"✅ Module SOH model for {c_rate}C loaded")
     except Exception as e:
         print(f"⚠️ Module SOH model for {c_rate}C not found: {e}")
+
+# 3b. Load per-module curve-reconstruction models (module_curve_train.py) --
+# predicts one module's complete voltage curve directly, replacing the old
+# head+observed+tail three-piece stitch (visible seam at the joins) with one
+# smooth model output for the weakest-module plot.
+try:
+    module_curve_model_0_3c = joblib.load(os.path.join(TEST_CASE_DIR, 'module_curve_reconstruction_model_0_3C.pkl'))
+    print("✅ 0.3C module curve-reconstruction model loaded")
+except Exception as e:
+    print(f"⚠️ 0.3C module curve-reconstruction model not found: {e}")
+    module_curve_model_0_3c = None
+
+try:
+    module_curve_model_1_0c = joblib.load(os.path.join(TEST_CASE_DIR, 'module_curve_reconstruction_model_1_0C.pkl'))
+    print("✅ 1.0C module curve-reconstruction model loaded")
+except Exception as e:
+    print(f"⚠️ 1.0C module curve-reconstruction model not found: {e}")
+    module_curve_model_1_0c = None
+
+# 3c. Real weakest-module full-charge voltage is a tight, near-constant
+# cluster across packs (see module_curve_train.typical_start_voltage) -- the
+# curve model's own checkpoint-0 regressor sometimes undershoots this by
+# 0.1-0.2V, since that single point carries almost no real signal from the
+# SFT input features. Computed once at startup and used to anchor
+# reconstruct_module_curve's first checkpoint directly.
+try:
+    from module_curve_train import typical_start_voltage
+    MODULE_START_VOLTAGE = {0.3: typical_start_voltage('0.3C'), 1.0: typical_start_voltage('1.0C')}
+    print(f"✅ Calibrated module start voltage: {MODULE_START_VOLTAGE}")
+except Exception as e:
+    MODULE_START_VOLTAGE = {}
+    print(f"⚠️ Could not calibrate module start voltage: {e}")
+
+# 3d. reconstruct_module_curve's last checkpoint (pct=1.0) is placed at
+# anchor_capacity, which its caller always computes as THIS module's
+# predicted capacity at the point its voltage crosses this value -- but the
+# curve model's own last-checkpoint regressor was trained to predict each
+# curve's absolute terminal voltage (real weakest-module curves keep going
+# well below this, e.g. ~2.2-2.4V, since the pack-level test only stops once
+# EVERY module including the strong ones has crossed cutoff). Left
+# uncorrected, the reconstructed curve visibly flattens out short of this
+# value instead of continuing its decline through the anchor point.
+MODULE_END_ANCHOR_V = 2.5
 
 # 4. Load per-(pack, C-rate bucket) weakest-module template curves, used as the
 # Tier-2 shape-transfer template for the SFT-only weakest-module endpoint (no
@@ -213,6 +323,93 @@ def reconstruct_full_curve(sft_df, pred_capacity, c_rate=0.3, actual_capacity=No
     dense_v = np.clip(interp_func(dense_ah), 1.8, 4.3)
 
     return dense_ah, dense_v, cutoff_ah
+
+
+def reconstruct_module_curve(sft_mod_ah, module_v_sft, module_mean_v_sft, anchor_capacity, c_rate):
+    """Module-level analog of reconstruct_full_curve -- one smooth model
+    output for a single module's complete voltage curve, replacing the old
+    head+observed+tail three-piece stitch. See module_curve_train.py for how
+    the underlying model was trained (same architecture and feature/target
+    definitions as the pack-level model above, just module-scoped; same
+    build_rows_from_curve function reused for both).
+
+    `anchor_capacity` is this module's own predicted capacity at
+    module_curve_train.TARGET_CUTOFF_V (2.5V) -- the same value already
+    computed for the "Pred @2.5V" card, so no separate estimate is needed."""
+    sft_delta_ah = sft_mod_ah[-1]
+    cutoff_ah = anchor_capacity - sft_delta_ah
+
+    estimated_soh = compute_soh(anchor_capacity)
+    sft_sampled_v = [np.interp(frac * sft_mod_ah[-1], sft_mod_ah, module_v_sft) for frac in SFT_SAMPLE_FRACTIONS]
+    imbalance_proxy = module_mean_v_sft - module_v_sft
+    feats = extract_enhanced_features(module_v_sft, sft_mod_ah, imbalance_proxy)
+
+    features = list(sft_sampled_v) + [
+        estimated_soh,
+        feats['initial_slope'], feats['final_slope'], feats['overall_slope'],
+        feats['mean_curvature'], feats['max_curvature'], feats['voltage_std'],
+        feats['voltage_range'], feats['plateau_length'], feats['end_voltage_drop'],
+        feats['end_slope'], feats['cell_imbalance_mean'], feats['cell_imbalance_std'],
+        feats['tail_knee_pct'], feats['tail_knee_slope'],
+        float(cutoff_ah)
+    ]
+
+    if abs(c_rate - 1.0) < 0.1 and module_curve_model_1_0c is not None:
+        model = module_curve_model_1_0c
+    elif module_curve_model_0_3c is not None:
+        model = module_curve_model_0_3c
+    else:
+        raise ValueError("No module curve-reconstruction model available")
+
+    pred_v = model.predict(np.array([features]))[0]
+    recon_ah = np.array([pct * anchor_capacity for pct in HEAD_CHECKPOINTS_PCT])
+
+    # Each of the 57 checkpoints is predicted by an independent per-output
+    # regressor (MultiOutputRegressor), with no ordering constraint between
+    # them -- in the noisy deep-knee-to-cutoff region (real training curves'
+    # tail-fill occasionally kinks right at the real/extrapolated boundary,
+    # see module_curve_train.py's docstring), this can produce a checkpoint
+    # that's HIGHER than the one before it, which cubic interpolation then
+    # renders as a visible upward "hike". A discharge voltage curve is
+    # physically non-increasing in cumulative Ah by definition, so enforcing
+    # it is a hard physical constraint, not a heuristic smoothing choice --
+    # see _enforce_monotonic_nonincreasing for why isotonic regression is
+    # used here instead of a simpler np.minimum.accumulate clamp. Smoothed
+    # first (see _smooth_checkpoints) so isotonic has less local noise
+    # amplitude to pool away into a flat patch in the first place.
+    pred_v = _smooth_checkpoints(pred_v)
+    pred_v = _enforce_monotonic_nonincreasing(recon_ah, pred_v)
+
+    # Checkpoint 0 (Ah=0, full charge) carries almost no real signal from
+    # the SFT input features -- real modules cluster tightly at 4.10-4.14V
+    # there regardless of degradation (see module_curve_train's
+    # typical_start_voltage), so the regressor's own prediction for this ONE
+    # point is pure noise relative to a direct data-calibrated anchor. Found
+    # on pk5 1.0C module 6: raw prediction was 3.91V vs the calibrated
+    # ~4.13V. Applied AFTER smoothing/isotonic, not before: setting it
+    # earlier gets undone by the median filter, which treats the corrected
+    # point as an outlier relative to its (still-low) raw neighbors and
+    # pulls it back down. Safe to set directly here -- raising the first
+    # point of an already non-increasing sequence can't violate monotonicity.
+    calibrated_start = MODULE_START_VOLTAGE.get(1.0 if abs(c_rate - 1.0) < 0.1 else 0.3)
+    if calibrated_start is not None and calibrated_start > pred_v[0]:
+        pred_v[0] = calibrated_start
+
+    # anchor_capacity IS this module's predicted capacity at
+    # MODULE_END_ANCHOR_V by definition (see caller) -- force the curve to
+    # actually reach that voltage there instead of trusting the raw
+    # last-checkpoint regressor (see MODULE_END_ANCHOR_V's docstring above).
+    # Isotonic re-applied so the preceding checkpoints pool smoothly toward
+    # the anchored endpoint instead of leaving a last-step jump/kink.
+    pred_v[-1] = MODULE_END_ANCHOR_V
+    pred_v = _enforce_monotonic_nonincreasing(recon_ah, pred_v)
+
+    dense_ah = np.linspace(recon_ah.min(), recon_ah.max(), 300)
+    interp_func = interp1d(recon_ah, pred_v, kind='cubic', fill_value='extrapolate')
+    dense_v = np.clip(interp_func(dense_ah), 1.8, 4.3)
+    dense_v = _enforce_monotonic_nonincreasing(dense_ah, dense_v)  # cubic spline can still overshoot between monotonic checkpoints
+
+    return dense_ah, dense_v
 
 
 def analyze_modules(sft_df, fft_df, c_rate):
@@ -360,9 +557,7 @@ def analyze():
             pred_soh = float(legacy_model.predict(X_soh)[0])
             pred_soh_source = 'legacy_pack_model'
 
-        # CRITICAL FIX: Convert SOH to whole number for clean capacity calculation
-        soh_whole_number = int(pred_soh)
-        pred_capacity = (soh_whole_number / 100.0) * NOMINAL_CAPACITY
+        pred_capacity = (pred_soh / 100.0) * NOMINAL_CAPACITY
         print(f"Predicted SOH: {pred_soh:.2f}%, Capacity: {pred_capacity:.2f} Ah  (source={pred_soh_source})")
 
         print("Extracting FFT ground truth...")
@@ -422,41 +617,61 @@ def analyze():
                   + ", ".join(f"@{cv}V pred={pred_results[cv]['capacity_ah']}Ah/{pred_results[cv]['soh']}% "
                               f"actual={actual_results[cv]['capacity_ah']}Ah/{actual_results[cv]['soh']}%" for cv in target_cutoffs))
 
-            # Same startup-transient trim + approximate head reconstruction as
-            # /analyze_weakest_module (see its comments for the full
-            # rationale) -- reused here so the SFT side of this module's
-            # curve is drawn the same, validated way.
+            # Same startup-transient trim as /analyze_weakest_module (see its
+            # comments for the full rationale) -- the real observed SFT
+            # segment is always overlaid on top of the reconstruction below,
+            # whichever path produces it.
             settle_idx = detect_settle_index(sft_mod_ah, module_v_sft)
             ah_settled, v_settled = sft_mod_ah[settle_idx:], module_v_sft[settle_idx:]
-
-            head_ah, head_v = np.array([]), np.array([])
-            try:
-                mod_recon_ah, mod_recon_v, _ = reconstruct_full_curve(sft_df, module_anchor_capacity, c_rate)
-                ah_offset_settled = ah_offset + (ah_settled[0] - sft_mod_ah[0])
-                ah_global_settled = ah_offset_settled + (ah_settled - ah_settled[0])
-                recon_v_at_module_ah = np.interp(ah_global_settled, mod_recon_ah, mod_recon_v)
-                boundary_n = min(10, len(ah_global_settled))
-                pack_mean_offset = float(np.mean(v_settled[:boundary_n] - recon_v_at_module_ah[:boundary_n]))
-                head_mask = mod_recon_ah < ah_offset_settled
-                if head_mask.sum() >= 2:
-                    head_ah = mod_recon_ah[head_mask]
-                    head_v = np.clip(mod_recon_v[head_mask] + pack_mean_offset, 1.8, 4.3)
-            except Exception as e:
-                print(f"⚠️ Head reconstruction unavailable: {e}")
+            ah_global_settled = ah_offset + (ah_settled - sft_mod_ah[0])
 
             print("Generating weakest-module plot...")
-            ah_global_settled = ah_offset + (ah_settled - sft_mod_ah[0])
-            pred_tail_ah_global = ah_offset + pred_tail_ah
             plt.figure(figsize=(10, 6))
-            # plt.plot(fft_mod_ah, module_v_fft, label='Real FFT (Ground Truth)', color='#64748b', linewidth=2.5, alpha=0.85)
-            if len(head_ah) > 0:
-                plt.plot(head_ah, head_v, label='Predicted Head (0 → SFT start, approximate)',
-                         color='#16a34a', linewidth=2, linestyle=':')
-            plt.plot(ah_global_settled, v_settled, label=f'Module {target_module} (Observed, SFT)', color='#2563eb', linewidth=2.5)
-            if len(pred_tail_ah_global) > 0:
-                order = np.argsort(pred_tail_ah_global)
-                plt.plot(pred_tail_ah_global[order], pred_tail_v[order], label='Extrapolated Tail (physics-based)',
+            plt.plot(fft_mod_ah, module_v_fft, label=f'Module {target_module} (Actual, FFT)',
+                     color='#64748b', linewidth=2.5, alpha=0.85)
+
+            # Preferred: one smooth model-predicted curve for this module,
+            # end-to-end (module_curve_train.py) -- replaces the old
+            # head+observed+tail three-piece stitch, which showed a visible
+            # seam at the segment joins. Falls back to the old stitch if the
+            # new model isn't available/loaded.
+            recon_drawn = False
+            try:
+                module_mean_v_sft = sft_modules[target_module]['mean_v']
+                recon_ah, recon_v = reconstruct_module_curve(
+                    sft_mod_ah, module_v_sft, module_mean_v_sft, pred_results[2.5]['capacity_ah'], c_rate,
+                )
+                plt.plot(recon_ah, recon_v, label=f'Module {target_module} (Reconstructed)',
                          color='#dc2626', linewidth=2, linestyle='--')
+                recon_drawn = True
+            except Exception as e:
+                print(f"⚠️ Smooth module curve reconstruction unavailable, falling back to stitched curve: {e}")
+
+            if not recon_drawn:
+                head_ah, head_v = np.array([]), np.array([])
+                try:
+                    mod_recon_ah, mod_recon_v, _ = reconstruct_full_curve(sft_df, module_anchor_capacity, c_rate)
+                    ah_offset_settled = ah_offset + (ah_settled[0] - sft_mod_ah[0])
+                    recon_v_at_module_ah = np.interp(ah_global_settled, mod_recon_ah, mod_recon_v)
+                    boundary_n = min(10, len(ah_global_settled))
+                    pack_mean_offset = float(np.mean(v_settled[:boundary_n] - recon_v_at_module_ah[:boundary_n]))
+                    head_mask = mod_recon_ah < ah_offset_settled
+                    if head_mask.sum() >= 2:
+                        head_ah = mod_recon_ah[head_mask]
+                        head_v = np.clip(mod_recon_v[head_mask] + pack_mean_offset, 1.8, 4.3)
+                except Exception as e:
+                    print(f"⚠️ Head reconstruction unavailable: {e}")
+
+                pred_tail_ah_global = ah_offset + pred_tail_ah
+                if len(head_ah) > 0:
+                    plt.plot(head_ah, head_v, label='Predicted Head (0 → SFT start, approximate)',
+                             color='#16a34a', linewidth=2, linestyle=':')
+                if len(pred_tail_ah_global) > 0:
+                    order = np.argsort(pred_tail_ah_global)
+                    plt.plot(pred_tail_ah_global[order], pred_tail_v[order], label='Extrapolated Tail (physics-based)',
+                             color='#dc2626', linewidth=2, linestyle='--')
+
+            # plt.plot(ah_global_settled, v_settled, label=f'Module {target_module} (Observed, SFT)', color='#2563eb', linewidth=2.5)
 
             marker_colors = {3.2: '#f59e0b', 2.5: '#a855f7'}
             for cv in target_cutoffs:
@@ -508,7 +723,7 @@ def analyze():
         return jsonify({
             'soh': round(pred_soh, 2),
             'soh_source': pred_soh_source,
-            'capacity': int(round(pred_capacity)),
+            'capacity': round(pred_capacity, 2),
             'actual_capacity': round(actual_capacity, 2),
             'actual_soh': round(actual_soh, 2),
             'weakest_module_results': weakest_module_results,
