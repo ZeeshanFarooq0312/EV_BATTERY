@@ -113,31 +113,47 @@ from build_module_dataset import load_module_templates
 print("Loading models...")
 
 # 1. Load SOH Models
+# TEMPORARILY DISABLED for a test run focused on the module-level pipeline.
+# This is the legacy pack-level model -- only used as a fallback in analyze()
+# when module analysis itself is unavailable (see the `if module_result is
+# not None` branch there); with soh_models left empty, that branch's own
+# `if c_rate not in soh_models: return jsonify({'error': ...}), 400` guard
+# already handles it as a clean error instead of a crash. Re-enable by
+# uncommenting below.
 soh_models = {}
 soh_feature_names = {}
-for c_rate in [0.3, 1.0]:
-    c_str = str(c_rate).replace('.', '_')
-    try:
-        soh_models[c_rate] = joblib.load(os.path.join(TEST_CASE_DIR, f'soh_model_{c_str}c.pkl'))
-        soh_feature_names[c_rate] = joblib.load(os.path.join(TEST_CASE_DIR, f'feature_names_{c_str}c.pkl'))
-        print(f"✅ SOH model for {c_rate}C loaded")
-    except Exception as e:
-        print(f"❌ Error loading SOH model for {c_rate}C: {e}")
+# for c_rate in [0.3, 1.0]:
+#     c_str = str(c_rate).replace('.', '_')
+#     try:
+#         soh_models[c_rate] = joblib.load(os.path.join(TEST_CASE_DIR, f'soh_model_{c_str}c.pkl'))
+#         soh_feature_names[c_rate] = joblib.load(os.path.join(TEST_CASE_DIR, f'feature_names_{c_str}c.pkl'))
+#         print(f"✅ SOH model for {c_rate}C loaded")
+#     except Exception as e:
+#         print(f"❌ Error loading SOH model for {c_rate}C: {e}")
 
 # 2. Load Reconstruction Models (v10 - complete global curve, knee-focused resolution)
-try:
-    recon_model_0_3c = joblib.load(os.path.join(TEST_CASE_DIR, 'reconstruction_model_0_3C_v10_knee.pkl'))
-    print("✅ 0.3C reconstruction model (v10 knee) loaded")
-except Exception as e:
-    print(f"⚠️ 0.3C reconstruction model not found: {e}")
-    recon_model_0_3c = None
+# TEMPORARILY DISABLED for a test run focused on the module-level pipeline
+# (module_soh_model_* + module_curve_model_*). This pack-level model is used
+# unconditionally in analyze() for the whole-pack reconstructed curve (feeds
+# the 'mae'/knee fields) AND as the fallback head-curve source if the
+# module-level reconstruction model fails -- both call sites are guarded
+# (see reconstruct_full_curve() callers) so leaving these as None degrades
+# gracefully instead of crashing /analyze. Re-enable by uncommenting below.
+# try:
+#     recon_model_0_3c = joblib.load(os.path.join(TEST_CASE_DIR, 'reconstruction_model_0_3C_v10_knee.pkl'))
+#     print("✅ 0.3C reconstruction model (v10 knee) loaded")
+# except Exception as e:
+#     print(f"⚠️ 0.3C reconstruction model not found: {e}")
+#     recon_model_0_3c = None
+recon_model_0_3c = None
 
-try:
-    recon_model_1_0c = joblib.load(os.path.join(TEST_CASE_DIR, 'reconstruction_model_1_0C_v10_knee.pkl'))
-    print("✅ 1.0C reconstruction model (v10 knee) loaded")
-except Exception as e:
-    print(f"⚠️ 1.0C reconstruction model not found: {e}")
-    recon_model_1_0c = None
+# try:
+#     recon_model_1_0c = joblib.load(os.path.join(TEST_CASE_DIR, 'reconstruction_model_1_0C_v10_knee.pkl'))
+#     print("✅ 1.0C reconstruction model (v10 knee) loaded")
+# except Exception as e:
+#     print(f"⚠️ 1.0C reconstruction model not found: {e}")
+#     recon_model_1_0c = None
+recon_model_1_0c = None
 
 # 3. Load per-module SOH models
 module_soh_models = {}
@@ -197,12 +213,17 @@ MODULE_END_ANCHOR_V = 2.5
 # 4. Load per-(pack, C-rate bucket) weakest-module template curves, used as the
 # Tier-2 shape-transfer template for the SFT-only weakest-module endpoint (no
 # ground-truth FFT file to draw a same-test template from at inference time).
-try:
-    MODULE_TEMPLATES = load_module_templates()
-    print(f"✅ Loaded {len(MODULE_TEMPLATES)} module template curves: {sorted(MODULE_TEMPLATES.keys())}")
-except Exception as e:
-    MODULE_TEMPLATES = {}
-    print(f"⚠️ Could not load module template curves: {e}")
+# TEMPORARILY DISABLED for a test run to isolate the actual (Tier 0/Tier 1)
+# model behavior from this Tier-2 fallback. Any module that needs Tier 2 will
+# now raise/error instead of silently borrowing a cross-pack template -- that's
+# intentional for this test, re-enable by uncommenting below.
+# try:
+#     MODULE_TEMPLATES = load_module_templates()
+#     print(f"✅ Loaded {len(MODULE_TEMPLATES)} module template curves: {sorted(MODULE_TEMPLATES.keys())}")
+# except Exception as e:
+#     MODULE_TEMPLATES = {}
+#     print(f"⚠️ Could not load module template curves: {e}")
+MODULE_TEMPLATES = {}
 
 
 def pick_template_curve(pack_id, c_bucket):
@@ -570,8 +591,12 @@ def analyze():
         print(f"Found {len(fft_ah)} FFT points. Actual Capacity: {actual_capacity:.2f} Ah, Actual SOH: {actual_soh:.2f}%")
 
         print("Reconstructing complete global curve from SFT...")
-        recon_ah, recon_v, cutoff_ah = reconstruct_full_curve(sft_df, pred_capacity, c_rate, actual_capacity=actual_capacity)
-        print(f"Reconstruction complete. SFT tail starts at {cutoff_ah:.2f} Ah of the reconstructed curve.")
+        try:
+            recon_ah, recon_v, cutoff_ah = reconstruct_full_curve(sft_df, pred_capacity, c_rate, actual_capacity=actual_capacity)
+            print(f"Reconstruction complete. SFT tail starts at {cutoff_ah:.2f} Ah of the reconstructed curve.")
+        except Exception as e:
+            print(f"⚠️ Pack-level reconstruction unavailable (disabled for this test run): {e}")
+            recon_ah, recon_v, cutoff_ah = None, None, None
 
         # Weakest-module capacity/SOH at BOTH fixed cutoffs (3.2V, 2.5V) --
         # predicted from the SFT (same tiered extrapolation as
@@ -701,21 +726,25 @@ def analyze():
             plt.close()
             print("Weakest-module plot generated successfully")
 
-        min_ah = max(fft_ah.min(), recon_ah.min())
-        max_ah = min(fft_ah.max(), recon_ah.max())
-        mask_fft = (fft_ah >= min_ah) & (fft_ah <= max_ah)
-        mask_recon = (recon_ah >= min_ah) & (recon_ah <= max_ah)
-        
-        if np.sum(mask_fft) > 0 and np.sum(mask_recon) > 0:
-            interp_func = interp1d(fft_ah[mask_fft], fft_v[mask_fft], kind='linear', fill_value='extrapolate')
-            v_fft_interp = interp_func(recon_ah[mask_recon])
-            mae = float(np.mean(np.abs(recon_v[mask_recon] - v_fft_interp))) * 1000
+        if recon_ah is None:
+            mae = None
+            pred_knee_ah = pred_knee_v = None
         else:
-            mae = 0.0
-        print(f"Reconstruction MAE: {mae:.2f} mV")
+            min_ah = max(fft_ah.min(), recon_ah.min())
+            max_ah = min(fft_ah.max(), recon_ah.max())
+            mask_fft = (fft_ah >= min_ah) & (fft_ah <= max_ah)
+            mask_recon = (recon_ah >= min_ah) & (recon_ah <= max_ah)
 
-        print("Detecting discharge knee point...")
-        pred_knee_ah, pred_knee_v = detect_knee(recon_ah, recon_v)
+            if np.sum(mask_fft) > 0 and np.sum(mask_recon) > 0:
+                interp_func = interp1d(fft_ah[mask_fft], fft_v[mask_fft], kind='linear', fill_value='extrapolate')
+                v_fft_interp = interp_func(recon_ah[mask_recon])
+                mae = float(np.mean(np.abs(recon_v[mask_recon] - v_fft_interp))) * 1000
+            else:
+                mae = 0.0
+            print(f"Reconstruction MAE: {mae:.2f} mV")
+
+            print("Detecting discharge knee point...")
+            pred_knee_ah, pred_knee_v = detect_knee(recon_ah, recon_v)
         actual_knee_ah, actual_knee_v = detect_knee(fft_ah, fft_v)
         knee_error_ah = abs(pred_knee_ah - actual_knee_ah) if (pred_knee_ah is not None and actual_knee_ah is not None) else None
         if pred_knee_ah is not None:
@@ -730,7 +759,7 @@ def analyze():
             'actual_capacity': round(actual_capacity, 2),
             'actual_soh': round(actual_soh, 2),
             'weakest_module_results': weakest_module_results,
-            'mae': round(mae, 2),
+            'mae': round(mae, 2) if mae is not None else None,
             'pred_knee_ah': round(pred_knee_ah, 2) if pred_knee_ah is not None else None,
             'pred_knee_v': round(pred_knee_v, 3) if pred_knee_v is not None else None,
             'actual_knee_ah': round(actual_knee_ah, 2) if actual_knee_ah is not None else None,
@@ -932,6 +961,10 @@ def analyze_weakest_module():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', debug=True, port=5000)
+    # use_reloader=False: the reloader spawns a second process that re-runs
+    # this whole script (double "Loading models..." block, double .pkl loads)
+    # -- the models are already restarted manually after every code/model
+    # change, so the auto-reload watcher isn't needed and was just noise.
+    app.run(host='0.0.0.0', debug=True, port=5000, use_reloader=False)
 
 
