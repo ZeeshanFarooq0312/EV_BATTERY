@@ -57,6 +57,7 @@ Two **separate module SOH models are trained per C-rate** (0.3C and 1.0C), becau
 - **Two voltage cutoffs, one pass**: 3.2V (a partial/usable-range cutoff) and 2.5V (near-total depletion, essentially where the FFT test itself stops) are both computed from a single tiered-extrapolation call — no need to pick one upfront.
 - **SFT Ah-axis offset**: SFT files are tail-only captures — their `AHDischarge` is zeroed at wherever that short test happened to start, not at full charge. Every module-level SFT computation anchors on that module's own predicted capacity (`ah_offset = predicted_capacity - sft_local_span`) to align the local axis to the true global one.
 - **IR-drop/relaxation transient**: SFT tests start from a rested state, producing a brief, real (not noise) sharp voltage sag that settles into the normal gentle plateau slope. `curve_utils.detect_settle_index` trims this before using SFT data as a curve-reconstruction anchor, so the predicted/observed join doesn't show an artificial spike.
+- **Tail-protected smoothing**: `app.py`'s `_smooth_checkpoints` median-filters the reconstructed curve to remove noise, but excludes the last `tail_protect` (default 5) checkpoints from that filter. The steep discharge knee near end-of-life is a genuine feature, not noise — median-filtering it flattened the knee into a "step then plunge" artifact, so the tail is now left untouched.
 - **Synthetic augmentation is physics-informed, not template-copying**: `synthetic_module_generator.py` builds independently-sampled *new* 108-cell virtual-pack curves (own capacity, knee timing, IR-sag, cell imbalance — all drawn from ranges measured in `physics_calibration.py`) rather than perturbing one real template's feature row. Every physical constant it samples from (plateau voltage, voltage span, IR-sag magnitude, knee-fraction range, cell imbalance) is measured from the real data, not hardcoded.
 
 ## Directory structure
@@ -163,6 +164,8 @@ python app.py
 ```
 
 Upload a short-test CSV (SFT/SFCT) and its corresponding full-test CSV (FFCT, used as ground truth). The dashboard shows the weakest module (predicted vs actual), its capacity/SOH at 3.2V and 2.5V (predicted vs actual), and a plot of its voltage curve — predicted head + observed SFT + extrapolated tail, against the real FFT ground truth.
+
+The **Per-Module Analysis** section shows every one of the pack's 9 modules side by side, each bar labeled with both predicted and actual **SOH% and capacity (Ah)** (e.g. `93.83% · 146.37Ah`), plus a hover tooltip naming the actual-value's source (`measured` from the FFT curve directly, or `estimated` via tiered extrapolation when that module's curve doesn't reach the target cutoff).
 
 ### Retrain the models
 
