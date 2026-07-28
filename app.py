@@ -15,7 +15,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from flask import Flask, render_template, request, jsonify
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d, median_filter
 from sklearn.isotonic import IsotonicRegression
@@ -87,9 +88,8 @@ def _smooth_checkpoints(y, sigma=1.2, tail_protect=5):
 
 warnings.filterwarnings('ignore')
 
-app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+app = FastAPI()
+os.makedirs('uploads', exist_ok=True)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 TEST_CASE_DIR = os.path.join(APP_DIR, 'TEST_CASE')
@@ -117,7 +117,7 @@ print("Loading models...")
 # This is the legacy pack-level model -- only used as a fallback in analyze()
 # when module analysis itself is unavailable (see the `if module_result is
 # not None` branch there); with soh_models left empty, that branch's own
-# `if c_rate not in soh_models: return jsonify({'error': ...}), 400` guard
+# `if c_rate not in soh_models: return JSONResponse({'error': ...}, 400)` guard
 # already handles it as a clean error instead of a crash. Re-enable by
 # uncommenting below.
 soh_models = {}
@@ -513,26 +513,23 @@ def analyze_modules(sft_df, fft_df, c_rate):
 # ==========================================
 # FLASK ROUTES
 # ==========================================
-@app.route('/')
+@app.get('/')
 def index():
-    return render_template('index.html')
+    return FileResponse(os.path.join(APP_DIR, 'templates', 'index.html'))
 
-@app.route('/analyze', methods=['POST'])
-def analyze():
+@app.post('/analyze')
+def analyze(sft_file: UploadFile | None = File(None), fft_file: UploadFile | None = File(None)):
     try:
-        if 'sft_file' not in request.files or 'fft_file' not in request.files:
-            return jsonify({'error': 'Please upload both SFT and FFT files.'}), 400
-
-        sft_file = request.files['sft_file']
-        fft_file = request.files['fft_file']
+        if sft_file is None or fft_file is None:
+            return JSONResponse({'error': 'Please upload both SFT and FFT files.'}, status_code=400)
 
         if sft_file.filename == '' or fft_file.filename == '':
-            return jsonify({'error': 'No selected file.'}), 400
+            return JSONResponse({'error': 'No selected file.'}, status_code=400)
 
         print(f"Reading SFT file: {sft_file.filename}")
-        sft_df = pd.read_csv(sft_file)
+        sft_df = pd.read_csv(sft_file.file)
         print(f"Reading FFT file: {fft_file.filename}")
-        fft_df = pd.read_csv(fft_file)
+        fft_df = pd.read_csv(fft_file.file)
 
         c_rate_match = re.search(r'(\d+(?:\.\d+)?)C', sft_file.filename)
         c_rate = float(c_rate_match.group(1)) if c_rate_match else 0.3
@@ -574,7 +571,7 @@ def analyze():
             print("   Module analysis unavailable -- falling back to legacy pack-level model")
             soh_feats = extract_soh_features(sft_df, c_rate)
             if c_rate not in soh_models:
-                return jsonify({'error': f'No SOH model available for {c_rate}C'}), 400
+                return JSONResponse({'error': f'No SOH model available for {c_rate}C'}, status_code=400)
             legacy_model = soh_models[c_rate]
             legacy_feats = soh_feature_names[c_rate]
             X_soh = pd.DataFrame([soh_feats]).reindex(columns=legacy_feats, fill_value=0)
@@ -752,7 +749,7 @@ def analyze():
         if actual_knee_ah is not None:
             print(f"   Actual knee:    {actual_knee_ah:.2f} Ah @ {actual_knee_v:.3f}V")
 
-        return jsonify({
+        return {
             'soh': round(pred_soh, 2),
             'soh_source': pred_soh_source,
             'capacity': round(pred_capacity, 2),
@@ -770,16 +767,16 @@ def analyze():
             'weakest_module_actual': module_result['weakest_module_actual'] if module_result else None,
             'module_error': module_error,
             'plot': weakest_module_plot_url
-        })
-        
+        }
+
     except Exception as e:
         print(f"❌ Error in analyze endpoint: {str(e)}")
         print(traceback.format_exc())
-        return jsonify({'error': f'Server error: {str(e)}'}), 500
+        return JSONResponse({'error': f'Server error: {str(e)}'}, status_code=500)
 
 
-@app.route('/analyze_weakest_module', methods=['POST'])
-def analyze_weakest_module():
+@app.post('/analyze_weakest_module')
+def analyze_weakest_module(sft_file: UploadFile | None = File(None)):
     """SFT-only: identifies the weakest module from the uploaded (partial) SFT
     file via the module SOH model, then estimates that module's own capacity
     and SOH at two fixed voltage cutoffs (3.2V, 2.5V) via the tiered physics
@@ -788,15 +785,14 @@ def analyze_weakest_module():
     from the pack's own or a cross-pack real full-curve test) rather than this
     test's own full curve."""
     try:
-        if 'sft_file' not in request.files:
-            return jsonify({'error': 'Please upload an SFT file.'}), 400
+        if sft_file is None:
+            return JSONResponse({'error': 'Please upload an SFT file.'}, status_code=400)
 
-        sft_file = request.files['sft_file']
         if sft_file.filename == '':
-            return jsonify({'error': 'No selected file.'}), 400
+            return JSONResponse({'error': 'No selected file.'}, status_code=400)
 
         print(f"Reading SFT file: {sft_file.filename}")
-        sft_df = pd.read_csv(sft_file)
+        sft_df = pd.read_csv(sft_file.file)
 
         pack_id, _ = parse_pack_and_crate(sft_file.filename)
         c_rate_match = re.search(r'(\d+(?:\.\d+)?)C', sft_file.filename)
@@ -807,7 +803,7 @@ def analyze_weakest_module():
         print(f"Detected pack_id={pack_id}, C-rate={c_rate} (bucket {c_bucket}C)")
 
         if c_bucket not in module_soh_models:
-            return jsonify({'error': f'No module SOH model available for {c_bucket}C'}), 400
+            return JSONResponse({'error': f'No module SOH model available for {c_bucket}C'}, status_code=400)
 
         sft_cell_cols = get_cell_columns(sft_df)
         feats_by_module = {}
@@ -816,7 +812,7 @@ def analyze_weakest_module():
             if f is not None:
                 feats_by_module[m] = f
         if len(feats_by_module) < N_MODULES:
-            return jsonify({'error': "SFT file too short to extract all 9 modules' features."}), 400
+            return JSONResponse({'error': "SFT file too short to extract all 9 modules' features."}, status_code=400)
 
         add_sibling_features(feats_by_module)
         model = module_soh_models[c_bucket]
@@ -838,7 +834,7 @@ def analyze_weakest_module():
 
         ah, pack_v, cell_std, modules = extract_and_resample_curve(sft_df, want_modules=True)
         if ah is None:
-            return jsonify({'error': 'SFT file missing AHDischarge column.'}), 400
+            return JSONResponse({'error': 'SFT file missing AHDischarge column.'}, status_code=400)
         module_v = modules[weakest_module]['min_v']
 
         # SFT files are TAIL-ONLY captures: their AHDischarge is zeroed at
@@ -858,7 +854,7 @@ def analyze_weakest_module():
 
         template_ah, template_v = pick_template_curve(pack_id, c_bucket)
         if template_ah is None:
-            return jsonify({'error': 'No template curve available for extrapolation.'}), 500
+            return JSONResponse({'error': 'No template curve available for extrapolation.'}, status_code=500)
         template_used = 'pack_own' if (pack_id, c_bucket) in MODULE_TEMPLATES else 'cross_pack_fallback'
 
         target_cutoffs = [3.2, 2.5]
@@ -945,26 +941,27 @@ def analyze_weakest_module():
         plt.close()
         print("Plot generated successfully")
 
-        return jsonify({
+        return {
             'weakest_module': weakest_module,
             'predicted_soh_by_module': {str(m): round(v, 2) for m, v in predicted_soh.items()},
             'results': {str(cv): res for cv, res in results.items()},
             'template_used': template_used,
             'head_reconstructed': len(head_ah) > 0,
             'plot': plot_url,
-        })
+        }
 
     except Exception as e:
         print(f"❌ Error in analyze_weakest_module endpoint: {str(e)}")
         print(traceback.format_exc())
-        return jsonify({'error': f'Server error: {str(e)}'}), 500
+        return JSONResponse({'error': f'Server error: {str(e)}'}, status_code=500)
 
 
 if __name__ == '__main__':
-    # use_reloader=False: the reloader spawns a second process that re-runs
-    # this whole script (double "Loading models..." block, double .pkl loads)
-    # -- the models are already restarted manually after every code/model
-    # change, so the auto-reload watcher isn't needed and was just noise.
-    app.run(host='0.0.0.0', debug=True, port=5000, use_reloader=False)
+    import uvicorn
+    # No reload: the models are already restarted manually after every
+    # code/model change (auto-reload also isn't compatible with this file's
+    # module-level model loading -- the reloader would re-run it in a
+    # separate watcher process, doubling load time for no benefit here).
+    uvicorn.run(app, host='0.0.0.0', port=5000)
 
 
