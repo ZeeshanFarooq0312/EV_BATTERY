@@ -414,6 +414,54 @@
             <p class="module-error-msg" id="moduleErrorMsg"></p>
         </div>
 
+        <div class="upload-section" style="margin-top: 30px;">
+            <div class="file-input-group">
+                <label for="cr_sft_file">Upload SFT File (1.0C, Partial)</label>
+                <input type="file" id="cr_sft_file" accept=".csv">
+            </div>
+            <div class="file-input-group">
+                <label for="cr_fft_file">Upload FFT File (0.3C, Full Ground Truth)</label>
+                <input type="file" id="cr_fft_file" accept=".csv">
+            </div>
+            <button id="crAnalyzeBtn" onclick="analyzeCrossRate()">Predict 0.3C SOH from 1.0C SFT</button>
+        </div>
+
+        <div class="loader" id="crLoader"></div>
+
+        <div class="module-section" id="crSection" style="display:none;">
+            <h2>Cross-Rate Prediction: 1.0C SFT &rarr; 0.3C SOH</h2>
+            <p style="color: var(--text-muted); margin-top: -10px; margin-bottom: 15px;">
+                Predicts every module's SOH/capacity AT 0.3C using only the uploaded 1.0C SFT file (a dedicated
+                cross-rate model, trained separately from the same-rate models above). "Actual" is measured directly
+                from the uploaded 0.3C FFT file's full discharge curve &mdash; shown here for validation only; a real
+                deployment wouldn't have this file available at prediction time.
+            </p>
+            <div class="metrics-grid" id="crMetricsGrid">
+                <div class="metric-card">
+                    <h3>Predicted SOH @ 0.3C (weakest module)</h3>
+                    <p class="value" id="crSohValue">--%</p>
+                </div>
+                <div class="metric-card">
+                    <h3>Predicted Capacity @ 0.3C</h3>
+                    <p class="value" id="crCapValue">-- Ah</p>
+                </div>
+                <div class="metric-card highlight">
+                    <h3>Actual SOH @ 0.3C (from FFT)</h3>
+                    <p class="value" id="crActualSohValue">--%</p>
+                </div>
+                <div class="metric-card highlight">
+                    <h3>Actual Capacity @ 0.3C (from FFT)</h3>
+                    <p class="value" id="crActualCapValue">-- Ah</p>
+                </div>
+            </div>
+            <div class="module-legend">
+                <div class="module-legend-item"><span class="module-legend-swatch" style="background:#2563eb;"></span>Actual @ 0.3C (from FFT)</div>
+                <div class="module-legend-item"><span class="module-legend-swatch" style="background:#dc2626;"></span>Predicted @ 0.3C (from 1.0C SFT)</div>
+            </div>
+            <div id="crModuleRows"></div>
+            <p class="module-error-msg" id="crModuleErrorMsg"></p>
+        </div>
+
         <!--
         <div class="upload-section" style="margin-top: 10px;">
             <div class="file-input-group">
@@ -595,6 +643,118 @@
                 // Reset UI
                 btn.disabled = false;
                 btn.innerText = "Analyze Battery";
+                loader.style.display = "none";
+            }
+        }
+
+        function renderCrossRateModules(data) {
+            const section = document.getElementById('crSection');
+            const rowsContainer = document.getElementById('crModuleRows');
+            const errMsg = document.getElementById('crModuleErrorMsg');
+            rowsContainer.innerHTML = '';
+            section.style.display = "block";
+
+            if (data.module_error || !data.modules) {
+                errMsg.innerText = data.module_error || "Per-module analysis unavailable.";
+                errMsg.style.display = 'block';
+                return;
+            }
+            errMsg.style.display = 'none';
+
+            const modules = data.modules;
+            const allValues = [];
+            modules.forEach(m => {
+                if (m.actual_soh !== null) allValues.push(m.actual_soh);
+                if (m.predicted_soh !== null) allValues.push(m.predicted_soh);
+            });
+            const domainMax = 100;
+            const domainMin = allValues.length ? Math.max(0, Math.floor(Math.min(...allValues)) - 3) : 0;
+            const span = Math.max(domainMax - domainMin, 1);
+
+            modules.forEach(m => {
+                const row = document.createElement('div');
+                row.className = 'module-row';
+                const isWeakestActual = m.module_idx === data.weakest_module_actual;
+                const isWeakestPred = m.module_idx === data.weakest_module_predicted;
+                if (isWeakestActual) row.classList.add('weakest');
+
+                const actualPct = m.actual_soh !== null ? Math.max(0, (m.actual_soh - domainMin) / span * 100) : 0;
+                const predPct = m.predicted_soh !== null ? Math.max(0, (m.predicted_soh - domainMin) / span * 100) : 0;
+                const actualTitle = m.actual_soh !== null
+                    ? `Actual SOH @ 0.3C: ${m.actual_soh}% / ${m.actual_capacity}Ah (${m.label_source || 'n/a'})` : 'Actual SOH: n/a';
+                const predTitle = m.predicted_soh !== null
+                    ? `Predicted SOH @ 0.3C: ${m.predicted_soh}% / ${m.predicted_capacity}Ah` : 'Predicted SOH: n/a';
+
+                let badges = '';
+                if (isWeakestActual) badges += '<span class="module-weakest-badge">WEAKEST</span>';
+                if (isWeakestPred && !isWeakestActual) badges += '<span class="module-weakest-badge predicted">PRED. WEAKEST</span>';
+
+                row.innerHTML = `
+                    <div class="module-label">Module ${m.module_idx}${badges}</div>
+                    <div class="module-bar-group">
+                        <div class="module-bar-track" title="${actualTitle}">
+                            <div class="module-bar-fill" style="width:${actualPct}%; background-color:#2563eb;"></div>
+                        </div>
+                        <div class="module-bar-value">${m.actual_soh !== null ? m.actual_soh.toFixed(2) + '% · ' + m.actual_capacity.toFixed(2) + 'Ah' : '--'}</div>
+                    </div>
+                    <div class="module-bar-group">
+                        <div class="module-bar-track" title="${predTitle}">
+                            <div class="module-bar-fill" style="width:${predPct}%; background-color:#dc2626;"></div>
+                        </div>
+                        <div class="module-bar-value">${m.predicted_soh !== null ? m.predicted_soh.toFixed(2) + '% · ' + m.predicted_capacity.toFixed(2) + 'Ah' : '--'}</div>
+                    </div>
+                `;
+                rowsContainer.appendChild(row);
+            });
+        }
+
+        async function analyzeCrossRate() {
+            const sftFile = document.getElementById('cr_sft_file').files[0];
+            const fftFile = document.getElementById('cr_fft_file').files[0];
+            const btn = document.getElementById('crAnalyzeBtn');
+            const loader = document.getElementById('crLoader');
+
+            if (!sftFile || !fftFile) {
+                alert("Please upload both a 1.0C SFT file and a 0.3C FFT file.");
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerText = "Predicting...";
+            loader.style.display = "block";
+            document.getElementById('crMetricsGrid').style.display = "none";
+            document.getElementById('crSection').style.display = "none";
+
+            const formData = new FormData();
+            formData.append('sft_file', sftFile);
+            formData.append('fft_file', fftFile);
+
+            try {
+                const response = await fetch('/analyze_cross_rate', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    document.getElementById('crSohValue').innerText = data.soh + "%";
+                    document.getElementById('crCapValue').innerText = data.capacity + " Ah";
+                    document.getElementById('crActualSohValue').innerText = data.actual_soh + "%";
+                    document.getElementById('crActualCapValue').innerText = data.actual_capacity + " Ah";
+
+                    renderCrossRateModules(data);
+
+                    document.getElementById('crMetricsGrid').style.display = "grid";
+                } else {
+                    alert("Error: " + data.error);
+                }
+            } catch (error) {
+                alert("An error occurred while predicting.");
+                console.error(error);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "Predict 0.3C SOH from 1.0C SFT";
                 loader.style.display = "none";
             }
         }
