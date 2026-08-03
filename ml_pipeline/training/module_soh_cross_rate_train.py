@@ -196,6 +196,7 @@ from curve_utils import (
 from build_module_dataset import DATA_FOLDER
 from module_soh_train import _c_rate_bucket, _soh_lookup, SLICE_PCTS
 from synthetic_cross_rate_generator import build_synthetic_cross_rate_module_rows
+from compute_device import get_xgb_device_params
 
 SOURCE_BUCKET = '1.0C'
 TARGET_BUCKET = '0.3C'
@@ -322,7 +323,7 @@ def train_cross_rate_module_soh_model(data_folder=DATA_FOLDER, synth_mode='modul
 
         model = xgb.XGBRegressor(n_estimators=300, max_depth=3, learning_rate=0.05,
                                   objective='reg:squarederror', random_state=42,
-                                  reg_alpha=0.1, reg_lambda=1.0)
+                                  reg_alpha=0.1, reg_lambda=1.0, **get_xgb_device_params())
         model.fit(X.iloc[train_idx], y[train_idx], sample_weight=w[train_idx])
 
         pred = model.predict(X.iloc[test_idx])
@@ -363,8 +364,12 @@ def train_cross_rate_module_soh_model(data_folder=DATA_FOLDER, synth_mode='modul
 
     final_model = xgb.XGBRegressor(n_estimators=300, max_depth=3, learning_rate=0.05,
                                     objective='reg:squarederror', random_state=42,
-                                    reg_alpha=0.1, reg_lambda=1.0)
+                                    reg_alpha=0.1, reg_lambda=1.0, **get_xgb_device_params())
     final_model.fit(X, y, sample_weight=w)
+    # See module_soh_train.py's identical comment: train fast on whatever
+    # device is available, but the saved/pickled model must not require a
+    # GPU to be present wherever it's later loaded for inference.
+    final_model.set_params(device='cpu')
     return final_model, list(X.columns)
 
 

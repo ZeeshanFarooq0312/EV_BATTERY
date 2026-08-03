@@ -1,4 +1,4 @@
-"""One-command training pipeline for non-technical users.
+"""One-command training pipeline.
 
 Given a folder of raw pack CSV exports, this:
   1. Cleans every file in it (see ml_pipeline/core/raw_file_cleaner.py --
@@ -18,14 +18,69 @@ Does NOT restart app.py automatically -- restart it yourself afterward
 (printed as the final instruction) to actually start serving the new
 models; app.py only loads models once at startup.
 
+Before doing anything else, this also checks that every package the
+pipeline needs (numpy, pandas, xgboost, joblib, scikit-learn) is installed,
+and pip-installs whichever ones are missing automatically -- no need to know
+what a "ModuleNotFoundError" is or run pip by hand. If a package
+fails to auto-install (e.g. no internet connection), that's reported clearly
+and the script stops instead of crashing later with a confusing traceback
+deep inside some other file.
+
 Usage (from new_tech/):
     python run_full_pipeline.py
 """
 
+import importlib
 import os
 import subprocess
 import sys
 import time
+import traceback
+
+# (import name, pip install name) -- only what THIS pipeline (cleaning +
+# the 3 active training scripts) needs; app.py has its own extra
+# dependencies (fastapi, uvicorn, matplotlib, ...) checked when it starts.
+REQUIRED_PACKAGES = [
+    ('numpy', 'numpy'),
+    ('pandas', 'pandas'),
+    ('xgboost', 'xgboost'),
+    ('joblib', 'joblib'),
+    ('sklearn', 'scikit-learn'),
+]
+
+
+def ensure_packages_installed():
+    missing = []
+    for import_name, pip_name in REQUIRED_PACKAGES:
+        try:
+            importlib.import_module(import_name)
+        except ImportError:
+            missing.append((import_name, pip_name))
+
+    if not missing:
+        return
+
+    print("Some required packages are missing -- installing them now "
+          "(this only needs to happen once):")
+    for import_name, pip_name in missing:
+        print(f"  Installing {pip_name} ...")
+        result = subprocess.run(
+            [sys.executable, '-m', 'pip', 'install', pip_name],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"\nERROR: couldn't automatically install '{pip_name}'.")
+            print("pip's error output:")
+            print(result.stderr.strip()[-2000:])
+            print(f"\nFix this (check your internet connection / permissions), then either:")
+            print(f"  - re-run this script, or")
+            print(f"  - install it yourself: {sys.executable} -m pip install {pip_name}")
+            sys.exit(1)
+        print(f"  {pip_name} installed successfully.")
+    print("All required packages are now installed.\n")
+
+
+ensure_packages_installed()
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 ML_PIPELINE_DIR = os.path.join(APP_DIR, 'ml_pipeline')
@@ -146,4 +201,12 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         print("\n\nCancelled.")
+        sys.exit(1)
+    except Exception as e:
+        # Anything unexpected (disk full, unwritable folder, a real bug,
+        # etc.) -- surface a clear headline before the traceback instead of
+        # letting a bare Python stack trace be the only thing shown.
+        print(f"\n\nPIPELINE FAILED: {e.__class__.__name__}: {e}")
+        print("Full error details:")
+        traceback.print_exc()
         sys.exit(1)
