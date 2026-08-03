@@ -3,3 +3,5 @@ __pycache__/
 *.log
 uploads/*
 !uploads/.gitkeep
+ml_pipeline/generated_outputs/*
+!ml_pipeline/generated_outputs/.gitkeep

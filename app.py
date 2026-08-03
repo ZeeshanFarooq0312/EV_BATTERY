@@ -92,8 +92,10 @@ app = FastAPI()
 os.makedirs('uploads', exist_ok=True)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-TEST_CASE_DIR = os.path.join(APP_DIR, 'TEST_CASE')
-sys.path.insert(0, TEST_CASE_DIR)
+ML_PIPELINE_DIR = os.path.join(APP_DIR, 'ml_pipeline')
+MODELS_DIR = os.path.join(ML_PIPELINE_DIR, 'models')
+sys.path.insert(0, os.path.join(ML_PIPELINE_DIR, 'core'))
+sys.path.insert(0, os.path.join(ML_PIPELINE_DIR, 'training'))
 
 from curve_utils import (
     NOMINAL_CAPACITY, HEAD_CHECKPOINTS_PCT, SFT_SAMPLE_FRACTIONS,
@@ -125,8 +127,8 @@ soh_feature_names = {}
 # for c_rate in [0.3, 1.0]:
 #     c_str = str(c_rate).replace('.', '_')
 #     try:
-#         soh_models[c_rate] = joblib.load(os.path.join(TEST_CASE_DIR, f'soh_model_{c_str}c.pkl'))
-#         soh_feature_names[c_rate] = joblib.load(os.path.join(TEST_CASE_DIR, f'feature_names_{c_str}c.pkl'))
+#         soh_models[c_rate] = joblib.load(os.path.join(MODELS_DIR, f'soh_model_{c_str}c.pkl'))
+#         soh_feature_names[c_rate] = joblib.load(os.path.join(MODELS_DIR, f'feature_names_{c_str}c.pkl'))
 #         print(f"✅ SOH model for {c_rate}C loaded")
 #     except Exception as e:
 #         print(f"❌ Error loading SOH model for {c_rate}C: {e}")
@@ -140,7 +142,7 @@ soh_feature_names = {}
 # (see reconstruct_full_curve() callers) so leaving these as None degrades
 # gracefully instead of crashing /analyze. Re-enable by uncommenting below.
 # try:
-#     recon_model_0_3c = joblib.load(os.path.join(TEST_CASE_DIR, 'reconstruction_model_0_3C_v10_knee.pkl'))
+#     recon_model_0_3c = joblib.load(os.path.join(MODELS_DIR, 'reconstruction_model_0_3C_v10_knee.pkl'))
 #     print("✅ 0.3C reconstruction model (v10 knee) loaded")
 # except Exception as e:
 #     print(f"⚠️ 0.3C reconstruction model not found: {e}")
@@ -148,7 +150,7 @@ soh_feature_names = {}
 recon_model_0_3c = None
 
 # try:
-#     recon_model_1_0c = joblib.load(os.path.join(TEST_CASE_DIR, 'reconstruction_model_1_0C_v10_knee.pkl'))
+#     recon_model_1_0c = joblib.load(os.path.join(MODELS_DIR, 'reconstruction_model_1_0C_v10_knee.pkl'))
 #     print("✅ 1.0C reconstruction model (v10 knee) loaded")
 # except Exception as e:
 #     print(f"⚠️ 1.0C reconstruction model not found: {e}")
@@ -161,25 +163,38 @@ module_soh_feature_names = {}
 for c_rate in [0.3, 1.0]:
     c_str = str(c_rate).replace('.', '_')
     try:
-        module_soh_models[c_rate] = joblib.load(os.path.join(TEST_CASE_DIR, f'module_soh_model_{c_str}c.pkl'))
-        module_soh_feature_names[c_rate] = joblib.load(os.path.join(TEST_CASE_DIR, f'module_feature_names_{c_str}c.pkl'))
+        module_soh_models[c_rate] = joblib.load(os.path.join(MODELS_DIR, f'module_soh_model_{c_str}c.pkl'))
+        module_soh_feature_names[c_rate] = joblib.load(os.path.join(MODELS_DIR, f'module_feature_names_{c_str}c.pkl'))
         print(f"✅ Module SOH model for {c_rate}C loaded")
     except Exception as e:
         print(f"⚠️ Module SOH model for {c_rate}C not found: {e}")
+
+# 3a2. Cross-rate module SOH model (module_soh_cross_rate_train.py) --
+# predicts a module's 0.3C SOH from FEATURES EXTRACTED AT 1.0C (the
+# module_soh_models[1.0]/[0.3] pair above are same-rate: features and label
+# share one C-rate). Used by /analyze_cross_rate for the "upload a 1.0C SFT,
+# see predicted 0.3C SOH/capacity vs an uploaded 0.3C FFT's actual value" flow.
+try:
+    module_soh_model_cross_rate = joblib.load(os.path.join(MODELS_DIR, 'module_soh_model_1_0c_to_0_3c.pkl'))
+    module_soh_feature_names_cross_rate = joblib.load(os.path.join(MODELS_DIR, 'module_feature_names_1_0c_to_0_3c.pkl'))
+    print("✅ Cross-rate module SOH model (1.0C -> 0.3C) loaded")
+except Exception as e:
+    module_soh_model_cross_rate = None
+    print(f"⚠️ Cross-rate module SOH model not found: {e}")
 
 # 3b. Load per-module curve-reconstruction models (module_curve_train.py) --
 # predicts one module's complete voltage curve directly, replacing the old
 # head+observed+tail three-piece stitch (visible seam at the joins) with one
 # smooth model output for the weakest-module plot.
 try:
-    module_curve_model_0_3c = joblib.load(os.path.join(TEST_CASE_DIR, 'module_curve_reconstruction_model_0_3C.pkl'))
+    module_curve_model_0_3c = joblib.load(os.path.join(MODELS_DIR, 'module_curve_reconstruction_model_0_3C.pkl'))
     print("✅ 0.3C module curve-reconstruction model loaded")
 except Exception as e:
     print(f"⚠️ 0.3C module curve-reconstruction model not found: {e}")
     module_curve_model_0_3c = None
 
 try:
-    module_curve_model_1_0c = joblib.load(os.path.join(TEST_CASE_DIR, 'module_curve_reconstruction_model_1_0C.pkl'))
+    module_curve_model_1_0c = joblib.load(os.path.join(MODELS_DIR, 'module_curve_reconstruction_model_1_0C.pkl'))
     print("✅ 1.0C module curve-reconstruction model loaded")
 except Exception as e:
     print(f"⚠️ 1.0C module curve-reconstruction model not found: {e}")
@@ -238,6 +253,34 @@ def pick_template_curve(pack_id, c_bucket):
     if same_bucket:
         return same_bucket[0]
     return next(iter(MODULE_TEMPLATES.values()), (None, None))
+
+
+# 5. Real 0.3C weakest-module template curves for cross-rate CURVE
+# reconstruction (/analyze_cross_rate's plot). Unlike the same-rate
+# reconstruct_module_curve, there is no 0.3C voltage shape signal available
+# at inference time at all -- only a 1.0C SFT is uploaded -- so a checkpoint
+# regressor has nothing 0.3C-shaped to condition on. This borrows the same
+# Tier-2 shape-transfer idea as pick_template_curve above (kept independent
+# of MODULE_TEMPLATES/its test-isolation toggle, since this is a separate
+# feature): each pack's own real historical 0.3C weakest-module curve SHAPE,
+# rescaled to the predicted capacity. See reconstruct_cross_rate_module_curve.
+try:
+    _all_module_templates = load_module_templates()
+    CROSS_RATE_TEMPLATES_03C = {pid: curve for (pid, bucket), curve in _all_module_templates.items() if bucket == 0.3}
+    print(f"✅ Loaded {len(CROSS_RATE_TEMPLATES_03C)} real 0.3C templates for cross-rate curve reconstruction: "
+          f"{sorted(CROSS_RATE_TEMPLATES_03C.keys())}")
+except Exception as e:
+    CROSS_RATE_TEMPLATES_03C = {}
+    print(f"⚠️ Could not load cross-rate 0.3C curve templates: {e}")
+
+
+def pick_cross_rate_template(pack_id):
+    """The uploaded pack's own real 0.3C weakest-module curve if we have one
+    on disk; else any other pack's (cross-pack shape borrowing, same
+    fallback idea as pick_template_curve). (None, None) if nothing loaded."""
+    if pack_id in CROSS_RATE_TEMPLATES_03C:
+        return CROSS_RATE_TEMPLATES_03C[pack_id]
+    return next(iter(CROSS_RATE_TEMPLATES_03C.values()), (None, None))
 
 
 print("✅ Startup complete!\n")
@@ -433,6 +476,29 @@ def reconstruct_module_curve(sft_mod_ah, module_v_sft, module_mean_v_sft, anchor
     return dense_ah, dense_v
 
 
+def reconstruct_cross_rate_module_curve(pack_id, pred_capacity_03c):
+    """Cross-rate analog of reconstruct_module_curve: since /analyze_cross_
+    rate only ever has a 1.0C SFT at inference time (no 0.3C voltage shape
+    signal at all -- that's the whole point of the feature), there's nothing
+    to feed a checkpoint regressor the way the same-rate model needs. Instead
+    this borrows the SAME PACK's own real historical 0.3C weakest-module
+    curve SHAPE (see CROSS_RATE_TEMPLATES_03C / pick_cross_rate_template --
+    the established Tier-2 shape-transfer idea already used elsewhere in this
+    codebase) and rescales its Ah-axis so the endpoint lands exactly on this
+    module's predicted 0.3C capacity from the cross-rate SOH model -- the
+    same rescale-a-real-template technique curve_train.generate_synthetic_
+    curve uses to turn one real curve into a family of different-SOH curves.
+    Voltage values are left untouched (shape-preserving rescale); only the
+    Ah axis stretches/compresses to hit the new endpoint."""
+    template_ah, template_v = pick_cross_rate_template(pack_id)
+    if template_ah is None:
+        raise ValueError("No real 0.3C template curve available for cross-rate reconstruction")
+
+    scale = pred_capacity_03c / float(template_ah[-1])
+    recon_ah = template_ah * scale
+    return recon_ah, template_v
+
+
 def analyze_modules(sft_df, fft_df, c_rate):
     """Per-module SOH: predicted from the uploaded (partial) SFT file via the
     module SOH model, and actual/ground-truth from the uploaded (full) FFT
@@ -468,6 +534,81 @@ def analyze_modules(sft_df, fft_df, c_rate):
         row['delta_Ah_norm'] = row['delta_Ah'] / (c_rate + 1e-5)
         X = pd.DataFrame([row]).reindex(columns=feature_names, fill_value=0)
         predicted[m] = float(model.predict(X)[0])
+
+    fft_cell_cols = get_cell_columns(fft_df)
+    ah, pack_v, cell_std, modules = extract_and_resample_curve(fft_df, want_modules=True)
+    cutoff_v = float(fft_df[fft_cell_cols].min(axis=1).iloc[-1])
+
+    tier0 = {}
+    for m, traces in modules.items():
+        idx = find_crossing_index(ah, traces['min_v'], cutoff_v)
+        if idx is not None:
+            tier0[m] = _interp_crossing_ah(ah, traces['min_v'], idx, cutoff_v)
+
+    actual, actual_capacity, label_source = {}, {}, {}
+    if tier0:
+        weakest_module = min(tier0, key=tier0.get)
+        template_v = modules[weakest_module]['min_v']
+        for m, traces in modules.items():
+            if m in tier0:
+                capacity_ah, source = tier0[m], 'measured'
+            else:
+                capacity_ah, source, _diag = estimate_module_capacity(
+                    ah, traces['min_v'], cutoff_v, template_ah=ah, template_v=template_v,
+                )
+            actual[m] = compute_soh(capacity_ah)
+            actual_capacity[m] = capacity_ah
+            label_source[m] = source
+
+    modules_result = [{
+        'module_idx': m,
+        'predicted_soh': round(predicted[m], 2) if m in predicted else None,
+        'actual_soh': round(actual[m], 2) if m in actual else None,
+        'predicted_capacity': round(predicted[m] / 100.0 * NOMINAL_CAPACITY, 2) if m in predicted else None,
+        'actual_capacity': round(actual_capacity[m], 2) if m in actual_capacity else None,
+        'label_source': label_source.get(m),
+    } for m in range(1, N_MODULES + 1)]
+
+    return {
+        'modules': modules_result,
+        'weakest_module_predicted': min(predicted, key=predicted.get) if predicted else None,
+        'weakest_module_actual': min(actual, key=actual.get) if actual else None,
+    }, None
+
+
+def analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df):
+    """Cross-rate per-module SOH: predicted 0.3C SOH from features extracted
+    from an uploaded 1.0C-bucket SFT file (module_soh_cross_rate_train.py's
+    model), and actual/ground-truth 0.3C SOH from an uploaded 0.3C FFT file
+    via the SAME tiered capacity extrapolation analyze_modules uses -- the
+    only difference from analyze_modules is that the SFT and FFT here are
+    deliberately different C-rates (1.0C source, 0.3C target), not the same
+    rate compared against itself. Returns (result_dict, error_message) --
+    exactly one is None."""
+    if module_soh_model_cross_rate is None:
+        return None, "Cross-rate module SOH model not available"
+
+    sft_cell_cols = get_cell_columns(sft_df)
+    pred_feats_by_module = {}
+    for m in range(1, N_MODULES + 1):
+        f = extract_module_features_from_slice(sft_df, module_cell_columns(sft_cell_cols, m))
+        if f is not None:
+            pred_feats_by_module[m] = f
+    if len(pred_feats_by_module) < N_MODULES:
+        return None, "SFT file too short to extract all 9 modules' features"
+
+    add_sibling_features(pred_feats_by_module)
+
+    predicted = {}
+    for m, f in pred_feats_by_module.items():
+        row = dict(f)
+        row['c_rate'] = sft_c_rate
+        row['is_sfct'] = 1.0
+        row['slice_start_pct'] = 0.0
+        row['voltage_drop_norm'] = row['voltage_drop'] / (sft_c_rate + 1e-5)
+        row['delta_Ah_norm'] = row['delta_Ah'] / (sft_c_rate + 1e-5)
+        X = pd.DataFrame([row]).reindex(columns=module_soh_feature_names_cross_rate, fill_value=0)
+        predicted[m] = float(module_soh_model_cross_rate.predict(X)[0])
 
     fft_cell_cols = get_cell_columns(fft_df)
     ah, pack_v, cell_std, modules = extract_and_resample_curve(fft_df, want_modules=True)
@@ -771,6 +912,115 @@ def analyze(sft_file: UploadFile | None = File(None), fft_file: UploadFile | Non
 
     except Exception as e:
         print(f"❌ Error in analyze endpoint: {str(e)}")
+        print(traceback.format_exc())
+        return JSONResponse({'error': f'Server error: {str(e)}'}, status_code=500)
+
+
+@app.post('/analyze_cross_rate')
+def analyze_cross_rate(sft_file: UploadFile | None = File(None), fft_file: UploadFile | None = File(None)):
+    """Cross-rate: upload a 1.0C SFT (source) + a 0.3C FFT (ground truth) --
+    predicts every module's 0.3C SOH/capacity from the 1.0C SFT alone
+    (module_soh_cross_rate_train.py's model), and reports the ACTUAL 0.3C
+    SOH/capacity measured directly from the uploaded FFT-0.3C file, so
+    predicted-vs-actual can be compared for a pack whose true 0.3C rating
+    genuinely wasn't available at prediction time -- see module_soh_cross_
+    rate_train.py's docstring for this model's validated accuracy (4/5
+    weakest-module ranking match, pk5 the known unresolved exception)."""
+    try:
+        if sft_file is None or fft_file is None:
+            return JSONResponse({'error': 'Please upload both a 1.0C SFT file and a 0.3C FFT file.'}, status_code=400)
+        if sft_file.filename == '' or fft_file.filename == '':
+            return JSONResponse({'error': 'No selected file.'}, status_code=400)
+
+        print(f"[cross-rate] Reading SFT (1.0C) file: {sft_file.filename}")
+        sft_df = pd.read_csv(sft_file.file)
+        print(f"[cross-rate] Reading FFT (0.3C) file: {fft_file.filename}")
+        fft_df = pd.read_csv(fft_file.file)
+
+        c_rate_match = re.search(r'(\d+(?:\.\d+)?)C', sft_file.filename)
+        sft_c_rate = float(c_rate_match.group(1)) if c_rate_match else 1.0
+        if abs(sft_c_rate - 0.95) < 0.05:
+            sft_c_rate = 1.0
+        if abs(sft_c_rate - 1.0) > 0.15:
+            print(f"⚠️ [cross-rate] SFT file's own C-rate ({sft_c_rate}) doesn't look like 1.0C -- "
+                  f"this model was only trained/validated for a 1.0C-bucket source file.")
+
+        module_result, module_error = analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df)
+        if module_error:
+            print(f"⚠️ [cross-rate] Module analysis failed: {module_error}")
+            return JSONResponse({'error': module_error}, status_code=400)
+
+        print("[cross-rate] Extracting FFT-0.3C ground truth (pack-level)...")
+        fft_ah, fft_v, _ = extract_and_resample_curve(fft_df)
+        actual_capacity = float(fft_ah[-1])
+        actual_soh = compute_soh(actual_capacity)
+
+        module_predicted_sohs = {m['module_idx']: m['predicted_soh'] for m in module_result['modules']}
+        pred_soh = min(module_predicted_sohs.values())
+        pred_capacity = (pred_soh / 100.0) * NOMINAL_CAPACITY
+
+        print(f"[cross-rate] Predicted (weakest module, from 1.0C SFT): {pred_soh:.2f}% / {pred_capacity:.2f} Ah   "
+              f"Actual (from 0.3C FFT, pack-level): {actual_soh:.2f}% / {actual_capacity:.2f} Ah")
+        print(f"[cross-rate] Weakest module -- predicted: {module_result['weakest_module_predicted']}  "
+              f"actual: {module_result['weakest_module_actual']}")
+
+        # Curve reconstruction: the predicted-weakest module's full 0.3C
+        # voltage curve (shape-transferred from a real template, rescaled to
+        # this module's predicted capacity -- see reconstruct_cross_rate_
+        # module_curve) plotted against that SAME module's real 0.3C curve
+        # straight from the uploaded FFT (exact ground truth, no
+        # extrapolation needed since the FFT is a complete discharge).
+        plot_url = None
+        target_module = module_result['weakest_module_predicted']
+        if target_module is not None:
+            try:
+                pack_id, _ = parse_pack_and_crate(sft_file.filename)
+                module_pred_capacity = next(
+                    m['predicted_capacity'] for m in module_result['modules'] if m['module_idx'] == target_module
+                )
+                recon_ah, recon_v = reconstruct_cross_rate_module_curve(pack_id, module_pred_capacity)
+
+                fft_mod_ah, _fft_pack_v, _fft_cell_std, fft_modules = extract_and_resample_curve(fft_df, want_modules=True)
+                module_v_fft = fft_modules[target_module]['min_v']
+
+                print("[cross-rate] Generating curve reconstruction plot...")
+                plt.figure(figsize=(10, 6))
+                plt.plot(fft_mod_ah, module_v_fft, label=f'Module {target_module} (Actual, FFT-0.3C)',
+                         color='#64748b', linewidth=2.5, alpha=0.85)
+                plt.plot(recon_ah, recon_v, label=f'Module {target_module} (Predicted, from 1.0C SFT)',
+                         color='#dc2626', linewidth=2, linestyle='--')
+                plt.title(f'Module {target_module} (Predicted Weakest) — 1.0C SFT → 0.3C Curve Reconstruction',
+                          fontsize=13, fontweight='bold', pad=15)
+                plt.xlabel('Capacity Delivered (Ah)', fontsize=12)
+                plt.ylabel('Min Cell Voltage in Module (V)', fontsize=12)
+                plt.legend(loc='upper right', fontsize=9)
+                plt.grid(True, linestyle=':', alpha=0.6)
+                plt.ylim(1.8, 4.3)
+                plt.tight_layout()
+
+                cr_img = io.BytesIO()
+                plt.savefig(cr_img, format='png', dpi=100, bbox_inches='tight')
+                cr_img.seek(0)
+                plot_url = base64.b64encode(cr_img.getvalue()).decode()
+                plt.close()
+                print("[cross-rate] Curve reconstruction plot generated successfully")
+            except Exception as e:
+                print(f"⚠️ [cross-rate] Curve reconstruction plot unavailable: {e}")
+                print(traceback.format_exc())
+
+        return {
+            'soh': round(pred_soh, 2),
+            'capacity': round(pred_capacity, 2),
+            'actual_soh': round(actual_soh, 2),
+            'actual_capacity': round(actual_capacity, 2),
+            'modules': module_result['modules'],
+            'weakest_module_predicted': module_result['weakest_module_predicted'],
+            'weakest_module_actual': module_result['weakest_module_actual'],
+            'plot': plot_url,
+        }
+
+    except Exception as e:
+        print(f"❌ Error in analyze_cross_rate endpoint: {str(e)}")
         print(traceback.format_exc())
         return JSONResponse({'error': f'Server error: {str(e)}'}, status_code=500)
 
