@@ -33,11 +33,25 @@ import numpy as np
 from curve_utils import detect_knee_index
 
 
-def find_crossing_index(ah, v, cutoff_v, tol=0.01):
+def find_crossing_index(ah, v, cutoff_v, tol=0.05):
     """First index of the contiguous run, ending at the last sample, where v
     stays at/below cutoff_v (+tol for sensor noise) -- i.e. a debounced
     "sustained crossing", not a transient sag-and-recover dip. Returns None
-    if the trace never reaches cutoff within observed data."""
+    if the trace never reaches cutoff within observed data.
+
+    tol was 0.01 until a real case surfaced it as too tight: cutoff_v comes
+    from the raw file's own last-row pack-wide min_v, while `v` here is the
+    RESAMPLED per-module trace (extract_and_resample_curve) -- when a
+    cleaned file's discharge window shifts by even 1-3 rows (e.g. different
+    cleaning runs of the identical raw source landing on slightly different
+    start/end boundaries), the resampled trace's last point can end up just
+    outside the old 0.01V tolerance even for the genuinely-correct weakest
+    module, silently dropping that module (and via build_module_dataset.py,
+    that whole file's pack+C-rate) out of training entirely. Measured across
+    4 real affected files: the correct module missed by 0.011-0.030V every
+    time, while the next-closest module was always 0.17-0.73V further away
+    -- 0.05 comfortably covers every observed miss with a wide margin still
+    well short of any real risk of picking the wrong module."""
     v = np.asarray(v)
     if v[-1] > cutoff_v + tol:
         return None
