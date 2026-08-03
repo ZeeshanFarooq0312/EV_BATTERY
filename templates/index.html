@@ -6,57 +6,136 @@
     <title>EV Battery SOH Dashboard</title>
     <style>
         :root {
-            --bg-color: #0f172a;
-            --card-bg: #1e293b;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-            --accent: #3b82f6;
-            --accent-hover: #2563eb;
-            --success: #10b981;
-            --danger: #ef4444;
-            --warning: #f59e0b;
+            --bg: #eef1f8;
+            --surface: #ffffff;
+            --surface-alt: #f8fafc;
+            --border: #e2e8f0;
+            --border-strong: #dbe2ec;
+            --text-main: #0f172a;
+            --text-muted: #64748b;
+            --text-faint: #94a3b8;
+            --accent: #2563eb;
+            --accent-hover: #1d4ed8;
+            --accent-soft: #eef4ff;
+            --success: #059669;
+            --success-soft: #ecfdf5;
+            --danger: #dc2626;
+            --danger-soft: #fef2f2;
+            --warning: #d97706;
+            --warning-soft: #fffbeb;
+            --knee: #7c3aed;
+            --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+            --shadow-md: 0 6px 16px rgba(15, 23, 42, 0.06), 0 1px 3px rgba(15, 23, 42, 0.06);
+            --radius: 14px;
+            --radius-sm: 8px;
         }
 
+        * { box-sizing: border-box; }
+
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: var(--bg-color);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background:
+                radial-gradient(1200px 500px at 10% -10%, #e4ecfb 0%, transparent 60%),
+                radial-gradient(1000px 500px at 100% 0%, #eef2ff 0%, transparent 55%),
+                var(--bg);
             color: var(--text-main);
             margin: 0;
-            padding: 20px;
+            padding: 32px 20px 60px;
             display: flex;
             flex-direction: column;
             align-items: center;
             min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
         }
 
         .dashboard-container {
             width: 100%;
-            max-width: 1000px;
+            max-width: 1080px;
         }
 
         header {
             text-align: center;
-            margin-bottom: 40px;
+            margin-bottom: 32px;
+        }
+
+        header .eyebrow {
+            display: inline-block;
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 1.4px;
+            text-transform: uppercase;
+            color: var(--accent);
+            background: var(--accent-soft);
+            border: 1px solid #dbeafe;
+            padding: 5px 14px;
+            border-radius: 999px;
+            margin-bottom: 14px;
         }
 
         header h1 {
-            font-size: 2.2rem;
+            font-size: 2.1rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
             margin: 0;
-            background: linear-gradient(90deg, #3b82f6, #8b5cf6);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            color: var(--text-main);
         }
 
         header p {
             color: var(--text-muted);
-            margin-top: 10px;
+            margin: 10px auto 0;
+            max-width: 620px;
+            font-size: 0.98rem;
+            line-height: 1.5;
+        }
+
+        .section-divider {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            margin: 44px 0 20px;
+        }
+
+        .section-divider::before, .section-divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: var(--border-strong);
+        }
+
+        .section-divider span {
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 1.2px;
+            text-transform: uppercase;
+            color: var(--text-faint);
+            white-space: nowrap;
+        }
+
+        .tool-header {
+            margin-bottom: 18px;
+        }
+
+        .tool-header h2 {
+            margin: 0 0 4px 0;
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+
+        .tool-header p {
+            margin: 0;
+            color: var(--text-muted);
+            font-size: 0.92rem;
+            line-height: 1.5;
+            max-width: 760px;
         }
 
         .upload-section {
-            background-color: var(--card-bg);
-            padding: 30px;
-            border-radius: 12px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            background-color: var(--surface);
+            padding: 26px 28px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-md);
             display: flex;
             gap: 20px;
             justify-content: center;
@@ -72,26 +151,39 @@
         }
 
         .file-input-group label, .select-group label {
-            font-size: 0.9rem;
+            font-size: 0.82rem;
             color: var(--text-muted);
             font-weight: 600;
         }
 
         input[type="file"] {
-            background-color: #334155;
+            background-color: var(--surface-alt);
             color: var(--text-main);
-            padding: 10px;
+            padding: 9px 10px;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+            width: 260px;
+            font-size: 0.88rem;
+        }
+
+        input[type="file"]::file-selector-button {
+            background-color: var(--accent-soft);
+            color: var(--accent-hover);
+            border: none;
             border-radius: 6px;
-            border: 1px solid #475569;
-            width: 250px;
+            padding: 6px 12px;
+            margin-right: 10px;
+            font-weight: 600;
+            font-size: 0.82rem;
+            cursor: pointer;
         }
 
         select {
-            background-color: #334155;
+            background-color: var(--surface-alt);
             color: var(--text-main);
             padding: 10px;
-            border-radius: 6px;
-            border: 1px solid #475569;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
             width: 150px;
             font-size: 0.95rem;
             cursor: pointer;
@@ -106,101 +198,257 @@
             background-color: var(--accent);
             color: white;
             border: none;
-            padding: 12px 30px;
-            border-radius: 6px;
-            font-size: 1rem;
-            font-weight: bold;
+            padding: 12px 28px;
+            border-radius: var(--radius-sm);
+            font-size: 0.95rem;
+            font-weight: 700;
             cursor: pointer;
-            transition: background 0.3s;
+            transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
             height: 42px;
+            box-shadow: 0 1px 2px rgba(37, 99, 235, 0.15);
         }
 
-        button:hover {
+        button:hover:not(:disabled) {
             background-color: var(--accent-hover);
+            box-shadow: 0 4px 10px rgba(37, 99, 235, 0.25);
+        }
+
+        button:active:not(:disabled) {
+            transform: translateY(1px);
         }
 
         button:disabled {
-            background-color: #475569;
+            background-color: #cbd5e1;
+            color: #64748b;
+            box-shadow: none;
             cursor: not-allowed;
         }
 
         .metrics-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
+            gap: 18px;
             margin-bottom: 30px;
             display: none;
         }
 
         .metric-card {
-            background-color: var(--card-bg);
-            padding: 20px;
-            border-radius: 12px;
-            text-align: center;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
-            border-top: 4px solid var(--accent);
+            background-color: var(--surface);
+            padding: 20px 22px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-sm);
+            border-top: 3px solid var(--accent);
+            transition: box-shadow 0.15s ease, transform 0.15s ease;
+        }
+
+        .metric-card:hover {
+            box-shadow: var(--shadow-md);
+            transform: translateY(-1px);
         }
 
         .metric-card h3 {
             margin: 0;
-            font-size: 0.9rem;
+            font-size: 0.76rem;
             color: var(--text-muted);
             text-transform: uppercase;
-            letter-spacing: 1px;
+            letter-spacing: 0.6px;
+            font-weight: 700;
         }
 
         .metric-card .value {
-            font-size: 2rem;
-            font-weight: bold;
-            margin: 10px 0 0 0;
+            font-size: 1.9rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            margin: 8px 0 0 0;
             color: var(--text-main);
+            font-variant-numeric: tabular-nums;
         }
 
         .metric-card.highlight {
             border-top-color: var(--success);
+            background: linear-gradient(180deg, var(--success-soft) 0%, var(--surface) 60px);
         }
 
         .metric-card.cutoff {
             border-top-color: var(--warning);
         }
 
+        .metric-card.knee {
+            border-top-color: var(--knee);
+        }
+
         .plot-section {
-            background-color: var(--card-bg);
-            padding: 20px;
-            border-radius: 12px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-            text-align: center;
+            background-color: var(--surface);
+            padding: 22px 24px 24px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-md);
+            text-align: left;
             display: none;
+            margin-bottom: 30px;
+        }
+
+        .plot-section h2 {
+            margin: 0 0 4px 0;
+            font-size: 1.15rem;
+            font-weight: 700;
         }
 
         .plot-section img {
+            display: block;
             max-width: 100%;
             height: auto;
-            border-radius: 8px;
-            margin-top: 15px;
+            border-radius: var(--radius-sm);
+            margin: 15px auto 0;
+            border: 1px solid var(--border);
         }
 
         .loader {
             display: none;
-            border: 4px solid #f3f3f3;
+            border: 4px solid var(--border);
             border-top: 4px solid var(--accent);
             border-radius: 50%;
             width: 30px;
             height: 30px;
-            animation: spin 1s linear infinite;
+            animation: spin 0.9s linear infinite;
             margin: 20px auto;
         }
 
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        .module-section {
+            background-color: var(--surface);
+            padding: 24px 26px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-md);
+            margin-bottom: 30px;
+            display: none;
+        }
+
+        .module-section h2 {
+            margin-top: 0;
+            font-size: 1.15rem;
+            font-weight: 700;
+        }
+
+        .module-legend {
+            display: flex;
+            gap: 24px;
+            margin-bottom: 16px;
+            font-size: 0.83rem;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .module-legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .module-legend-swatch {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+            display: inline-block;
+        }
+
+        .module-row {
+            display: grid;
+            grid-template-columns: 130px 1fr 1fr;
+            gap: 16px;
+            align-items: center;
+            padding: 10px 12px;
+            border-radius: var(--radius-sm);
+            margin-bottom: 4px;
+            border: 1px solid transparent;
+        }
+
+        .module-row:nth-child(odd) {
+            background-color: var(--surface-alt);
+        }
+
+        .module-row.weakest {
+            background-color: var(--danger-soft);
+            border: 1px solid #fecaca;
+        }
+
+        .module-label {
+            font-size: 0.88rem;
+            font-weight: 700;
+            color: var(--text-main);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .module-bar-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .module-bar-track {
+            flex: 1;
+            height: 9px;
+            background: var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .module-bar-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.4s ease;
+        }
+
+        .module-bar-value {
+            font-size: 0.78rem;
+            width: 118px;
+            text-align: right;
+            color: var(--text-main);
+            font-variant-numeric: tabular-nums;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .module-weakest-badge {
+            font-size: 0.62rem;
+            background-color: var(--danger);
+            color: white;
+            padding: 2px 7px;
+            border-radius: 4px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+
+        .module-weakest-badge.predicted {
+            background-color: var(--warning);
+        }
+
+        .module-error-msg {
+            color: var(--warning);
+            font-size: 0.9rem;
+            display: none;
+        }
     </style>
 </head>
 <body>
 
     <div class="dashboard-container">
         <header>
-            <h1>EV Battery SOH & Curve Reconstruction</h1>
-            <p>Upload your SFT and FFT files to analyze battery health and reconstruct the full discharge curve.</p>
+            <span class="eyebrow">Battery Diagnostics</span>
+            <h1>EV Battery SOH &amp; Complete Global Curve Reconstruction</h1>
+            <p>Upload your SFT and FFT files to analyze battery health and reconstruct the complete global discharge curve.</p>
         </header>
+
+        <div class="tool-header">
+            <h2>Same-Rate Analysis</h2>
+            <p>Upload a partial SFT and a complete FFT captured at the <strong>same C-rate</strong> to predict per-module SOH and reconstruct the full discharge curve.</p>
+        </div>
 
         <div class="upload-section">
             <div class="file-input-group">
@@ -211,13 +459,6 @@
                 <label for="fft_file">Upload FFT File (Full Ground Truth)</label>
                 <input type="file" id="fft_file" accept=".csv">
             </div>
-            <div class="select-group">
-                <label for="voltageCutoff">Voltage Cutoff</label>
-                <select id="voltageCutoff">
-                    <option value="3.2">3.2V</option>
-                    <option value="2.5">2.5V</option>
-                </select>
-            </div>
             <button id="analyzeBtn" onclick="analyzeBattery()">Analyze Battery</button>
         </div>
 
@@ -227,6 +468,7 @@
             <div class="metric-card">
                 <h3>Predicted SOH</h3>
                 <p class="value" id="sohValue">--%</p>
+                <p style="font-size: 0.7rem; color: var(--text-muted); margin: 4px 0 0 0;" id="sohSourceLabel"></p>
             </div>
             <div class="metric-card">
                 <h3>Predicted Capacity</h3>
@@ -236,23 +478,245 @@
                 <h3>Actual Capacity (FFT)</h3>
                 <p class="value" id="actualCapValue">-- Ah</p>
             </div>
-            <div class="metric-card cutoff">
-                <h3>Capacity at <span id="cutoffLabel">3.2V</span></h3>
-                <p class="value" id="cutoffCapValue">-- Ah</p>
+            <div class="metric-card highlight">
+                <h3>Actual SOH (Capacity/156)</h3>
+                <p class="value" id="actualSohValue">--%</p>
             </div>
+            <!--
+            <div class="metric-card cutoff">
+                <h3>Weakest Module Capacity @ 3.2V</h3>
+                <p class="value" id="cap32Value">-- Ah</p>
+                <p style="font-size: 0.75rem; color: var(--text-muted); margin: 4px 0 0 0;">Actual: <span id="cap32ActualValue">--</span> Ah</p>
+            </div>
+            <div class="metric-card cutoff">
+                <h3>Weakest Module SOH @ 3.2V</h3>
+                <p class="value" id="soh32Value">--%</p>
+                <p style="font-size: 0.75rem; color: var(--text-muted); margin: 4px 0 0 0;">Actual: <span id="soh32ActualValue">--</span>%</p>
+            </div>
+            <div class="metric-card cutoff">
+                <h3>Weakest Module Capacity @ 2.5V</h3>
+                <p class="value" id="cap25Value">-- Ah</p>
+                <p style="font-size: 0.75rem; color: var(--text-muted); margin: 4px 0 0 0;">Actual: <span id="cap25ActualValue">--</span> Ah</p>
+            </div>
+            <div class="metric-card cutoff">
+                <h3>Weakest Module SOH @ 2.5V</h3>
+                <p class="value" id="soh25Value">--%</p>
+                <p style="font-size: 0.75rem; color: var(--text-muted); margin: 4px 0 0 0;">Actual: <span id="soh25ActualValue">--</span>%</p>
+            </div>
+            -->
+            <!--
+            <div class="metric-card">
+                <h3>Reconstruction MAE</h3>
+                <p class="value" id="maeValue">-- mV</p>
+            </div>
+            -->
+            <!--
+            <div class="metric-card knee">
+                <h3>Predicted Knee Point</h3>
+                <p class="value" id="predKneeValue">-- Ah</p>
+            </div>
+            <div class="metric-card knee">
+                <h3>Actual Knee Point</h3>
+                <p class="value" id="actualKneeValue">-- Ah</p>
+            </div>
+            <div class="metric-card knee">
+                <h3>Knee Location Error</h3>
+                <p class="value" id="kneeErrorValue">-- Ah</p>
+            </div>
+            -->
         </div>
 
         <div class="plot-section" id="plotSection">
-            <h2>Curve Overlay Comparison</h2>
-            <img id="plotImage" src="" alt="Reconstruction Plot">
+            <h2>Weakest Module Voltage Curve</h2>
+            <p style="color: var(--text-muted); margin-top: -10px; margin-bottom: 15px;">
+                The pack's weakest module's discharge curve: predicted (reconstructed from the uploaded SFT) vs the
+                complete real curve (from the uploaded FFT). Circles mark predicted capacity/SOH at 3.2V and 2.5V;
+                triangles mark the actual values.
+            </p>
+            <img id="plotImage" src="" alt="Weakest Module Voltage Curve Plot">
         </div>
+
+        <div class="module-section" id="moduleSection">
+            <h2>Per-Module Analysis</h2>
+            <p style="color: var(--text-muted); margin-top: -10px; margin-bottom: 15px;">
+                Splits the pack's 108 cells into its 9 modules (12 cells each). "Predicted" comes from the
+                uploaded SFT file via the module SOH model; "Actual" is measured or estimated directly from
+                the uploaded FFT file's full discharge curve. Each bar shows SOH% and capacity (Ah); hover
+                for the source.
+            </p>
+            <div class="module-legend">
+                <div class="module-legend-item"><span class="module-legend-swatch" style="background:#2563eb;"></span>Actual (from FFT)</div>
+                <div class="module-legend-item"><span class="module-legend-swatch" style="background:#dc2626;"></span>Predicted (from SFT)</div>
+            </div>
+            <div id="moduleRows"></div>
+            <p class="module-error-msg" id="moduleErrorMsg"></p>
+        </div>
+
+        <div class="section-divider"><span>Cross-Rate Tool</span></div>
+
+        <div class="tool-header">
+            <h2>Cross-Rate Prediction: 1.0C SFT &rarr; 0.3C SOH</h2>
+            <p>Upload only a 1.0C SFT to predict every module's SOH/capacity <strong>at 0.3C</strong> using a dedicated cross-rate model. Optionally upload a 0.3C FFT as well to validate the prediction against real ground truth.</p>
+        </div>
+
+        <div class="upload-section">
+            <div class="file-input-group">
+                <label for="cr_sft_file">Upload SFT File (1.0C, Partial)</label>
+                <input type="file" id="cr_sft_file" accept=".csv">
+            </div>
+            <div class="file-input-group">
+                <label for="cr_fft_file">Upload FFT File (0.3C, Full Ground Truth)</label>
+                <input type="file" id="cr_fft_file" accept=".csv">
+            </div>
+            <button id="crAnalyzeBtn" onclick="analyzeCrossRate()">Predict 0.3C SOH from 1.0C SFT</button>
+        </div>
+
+        <div class="loader" id="crLoader"></div>
+
+        <div class="module-section" id="crSection" style="display:none;">
+            <h2>Per-Module Results</h2>
+            <div class="metrics-grid" id="crMetricsGrid">
+                <div class="metric-card">
+                    <h3>Predicted SOH @ 0.3C (weakest module)</h3>
+                    <p class="value" id="crSohValue">--%</p>
+                </div>
+                <div class="metric-card">
+                    <h3>Predicted Capacity @ 0.3C</h3>
+                    <p class="value" id="crCapValue">-- Ah</p>
+                </div>
+                <div class="metric-card highlight">
+                    <h3>Actual SOH @ 0.3C (from FFT)</h3>
+                    <p class="value" id="crActualSohValue">--%</p>
+                </div>
+                <div class="metric-card highlight">
+                    <h3>Actual Capacity @ 0.3C (from FFT)</h3>
+                    <p class="value" id="crActualCapValue">-- Ah</p>
+                </div>
+            </div>
+            <div class="module-legend">
+                <div class="module-legend-item"><span class="module-legend-swatch" style="background:#2563eb;"></span>Actual @ 0.3C (from FFT)</div>
+                <div class="module-legend-item"><span class="module-legend-swatch" style="background:#dc2626;"></span>Predicted @ 0.3C (from 1.0C SFT)</div>
+            </div>
+            <div id="crModuleRows"></div>
+            <p class="module-error-msg" id="crModuleErrorMsg"></p>
+        </div>
+
+        <div class="plot-section" id="crPlotSection" style="display:none;">
+            <h2>Weakest Module Curve Reconstruction: 1.0C SFT &rarr; 0.3C</h2>
+            <p style="color: var(--text-muted); margin-top: -10px; margin-bottom: 15px;">
+                The predicted-weakest module's full 0.3C discharge curve: predicted (shape-transferred from the
+                pack's own real 0.3C template, rescaled to the module's predicted capacity) vs the complete real
+                curve for that same module (from the uploaded FFT).
+            </p>
+            <img id="crPlotImage" src="" alt="Cross-Rate Weakest Module Curve Reconstruction Plot">
+        </div>
+
+        <!--
+        <div class="upload-section" style="margin-top: 10px;">
+            <div class="file-input-group">
+                <label for="wm_sft_file">Weakest Module Predictor &mdash; SFT File Only</label>
+                <input type="file" id="wm_sft_file" accept=".csv">
+            </div>
+            <button id="wmAnalyzeBtn" onclick="predictWeakestModule()">Predict Weakest Module</button>
+        </div>
+
+        <div class="loader" id="wmLoader"></div>
+
+        <div class="metrics-grid" id="wmMetricsGrid">
+            <div class="metric-card">
+                <h3>Weakest Module</h3>
+                <p class="value" id="wmModuleValue">--</p>
+            </div>
+            <div class="metric-card cutoff">
+                <h3>Capacity / SOH @ 3.2V</h3>
+                <p class="value" id="wm32Value" style="font-size:1.3rem;">--</p>
+            </div>
+            <div class="metric-card knee">
+                <h3>Capacity / SOH @ 2.5V</h3>
+                <p class="value" id="wm25Value" style="font-size:1.3rem;">--</p>
+            </div>
+        </div>
+
+        <div class="plot-section" id="wmPlotSection">
+            <h2>Weakest Module Voltage Curve</h2>
+            <p style="color: var(--text-muted); margin-top: -10px; margin-bottom: 15px;">
+                Identified from the uploaded SFT file alone (no FFT required). Dotted green is the
+                predicted head (0 Ah to SFT start) &mdash; approximate, from the pack-level reconstruction
+                model shifted to this module's own voltage level. Solid blue is the module's own observed
+                data. Dashed red is the physics-based extrapolated tail, using the same tiered
+                knee-extrapolation / shape-transfer method as the FFT comparison flow. Markers show
+                capacity and SOH at 3.2V and 2.5V.
+            </p>
+            <img id="wmPlotImage" src="" alt="Weakest Module Voltage Curve Plot">
+        </div>
+        -->
     </div>
 
     <script>
+        function renderModules(data) {
+            const section = document.getElementById('moduleSection');
+            const rowsContainer = document.getElementById('moduleRows');
+            const errMsg = document.getElementById('moduleErrorMsg');
+            rowsContainer.innerHTML = '';
+            section.style.display = "block";
+
+            if (data.module_error || !data.modules) {
+                errMsg.innerText = data.module_error || "Per-module analysis unavailable.";
+                errMsg.style.display = 'block';
+                return;
+            }
+            errMsg.style.display = 'none';
+
+            const modules = data.modules;
+            const allValues = [];
+            modules.forEach(m => {
+                if (m.actual_soh !== null) allValues.push(m.actual_soh);
+                if (m.predicted_soh !== null) allValues.push(m.predicted_soh);
+            });
+            const domainMax = 100;
+            const domainMin = allValues.length ? Math.max(0, Math.floor(Math.min(...allValues)) - 3) : 0;
+            const span = Math.max(domainMax - domainMin, 1);
+
+            modules.forEach(m => {
+                const row = document.createElement('div');
+                row.className = 'module-row';
+                const isWeakestActual = m.module_idx === data.weakest_module_actual;
+                const isWeakestPred = m.module_idx === data.weakest_module_predicted;
+                if (isWeakestActual) row.classList.add('weakest');
+
+                const actualPct = m.actual_soh !== null ? Math.max(0, (m.actual_soh - domainMin) / span * 100) : 0;
+                const predPct = m.predicted_soh !== null ? Math.max(0, (m.predicted_soh - domainMin) / span * 100) : 0;
+                const actualTitle = m.actual_soh !== null
+                    ? `Actual SOH: ${m.actual_soh}% / ${m.actual_capacity}Ah (${m.label_source || 'n/a'})` : 'Actual SOH: n/a';
+                const predTitle = m.predicted_soh !== null
+                    ? `Predicted SOH: ${m.predicted_soh}% / ${m.predicted_capacity}Ah` : 'Predicted SOH: n/a';
+
+                let badges = '';
+                if (isWeakestActual) badges += '<span class="module-weakest-badge">WEAKEST</span>';
+                if (isWeakestPred && !isWeakestActual) badges += '<span class="module-weakest-badge predicted">PRED. WEAKEST</span>';
+
+                row.innerHTML = `
+                    <div class="module-label">Module ${m.module_idx}${badges}</div>
+                    <div class="module-bar-group">
+                        <div class="module-bar-track" title="${actualTitle}">
+                            <div class="module-bar-fill" style="width:${actualPct}%; background-color:#2563eb;"></div>
+                        </div>
+                        <div class="module-bar-value">${m.actual_soh !== null ? m.actual_soh.toFixed(2) + '% · ' + m.actual_capacity.toFixed(2) + 'Ah' : '--'}</div>
+                    </div>
+                    <div class="module-bar-group">
+                        <div class="module-bar-track" title="${predTitle}">
+                            <div class="module-bar-fill" style="width:${predPct}%; background-color:#dc2626;"></div>
+                        </div>
+                        <div class="module-bar-value">${m.predicted_soh !== null ? m.predicted_soh.toFixed(2) + '% · ' + m.predicted_capacity.toFixed(2) + 'Ah' : '--'}</div>
+                    </div>
+                `;
+                rowsContainer.appendChild(row);
+            });
+        }
+
         async function analyzeBattery() {
             const sftFile = document.getElementById('sft_file').files[0];
             const fftFile = document.getElementById('fft_file').files[0];
-            const voltageCutoff = document.getElementById('voltageCutoff').value;
             const btn = document.getElementById('analyzeBtn');
             const loader = document.getElementById('loader');
 
@@ -267,11 +731,11 @@
             loader.style.display = "block";
             document.getElementById('metricsGrid').style.display = "none";
             document.getElementById('plotSection').style.display = "none";
+            document.getElementById('moduleSection').style.display = "none";
 
             const formData = new FormData();
             formData.append('sft_file', sftFile);
             formData.append('fft_file', fftFile);
-            formData.append('voltage_cutoff', voltageCutoff);
 
             try {
                 const response = await fetch('/analyze', {
@@ -284,13 +748,36 @@
                 if (response.ok) {
                     // Update Metrics
                     document.getElementById('sohValue').innerText = data.soh + "%";
+                    document.getElementById('sohSourceLabel').innerText =
+                        data.soh_source === 'module_derived' ? 'via per-module analysis (weakest module)'
+                        : data.soh_source === 'legacy_pack_model' ? 'via legacy pack-level model (fallback)'
+                        : '';
                     document.getElementById('capValue').innerText = data.capacity + " Ah";
                     document.getElementById('actualCapValue').innerText = data.actual_capacity + " Ah";
-                    document.getElementById('cutoffCapValue').innerText = data.cutoff_capacity + " Ah";
-                    document.getElementById('cutoffLabel').innerText = voltageCutoff + "V";
-                    
+                    document.getElementById('actualSohValue').innerText = data.actual_soh + "%";
+                    // document.getElementById('maeValue').innerText = data.mae + " mV";
+                    // document.getElementById('predKneeValue').innerText = data.pred_knee_ah !== null ? (data.pred_knee_ah + " Ah") : "N/A";
+                    // document.getElementById('actualKneeValue').innerText = data.actual_knee_ah !== null ? (data.actual_knee_ah + " Ah") : "N/A";
+                    // document.getElementById('kneeErrorValue').innerText = data.knee_error_ah !== null ? (data.knee_error_ah + " Ah") : "N/A";
+
+                    // Weakest-module capacity/SOH at both fixed cutoffs -- cards
+                    // removed, this is already shown directly on the plot's markers.
+                    const wm = data.weakest_module_results;
+                    if (false && wm) {
+                        document.getElementById('cap32Value').innerText = wm["3.2"].predicted.capacity_ah + " Ah";
+                        document.getElementById('cap32ActualValue').innerText = wm["3.2"].actual.capacity_ah;
+                        document.getElementById('soh32Value').innerText = wm["3.2"].predicted.soh + "%";
+                        document.getElementById('soh32ActualValue').innerText = wm["3.2"].actual.soh;
+                        document.getElementById('cap25Value').innerText = wm["2.5"].predicted.capacity_ah + " Ah";
+                        document.getElementById('cap25ActualValue').innerText = wm["2.5"].actual.capacity_ah;
+                        document.getElementById('soh25Value').innerText = wm["2.5"].predicted.soh + "%";
+                        document.getElementById('soh25ActualValue').innerText = wm["2.5"].actual.soh;
+                    }
+
                     // Update Plot
                     document.getElementById('plotImage').src = "data:image/png;base64," + data.plot;
+
+                    renderModules(data);
 
                     // Show Results
                     document.getElementById('metricsGrid').style.display = "grid";
@@ -305,6 +792,176 @@
                 // Reset UI
                 btn.disabled = false;
                 btn.innerText = "Analyze Battery";
+                loader.style.display = "none";
+            }
+        }
+
+        function renderCrossRateModules(data) {
+            const section = document.getElementById('crSection');
+            const rowsContainer = document.getElementById('crModuleRows');
+            const errMsg = document.getElementById('crModuleErrorMsg');
+            rowsContainer.innerHTML = '';
+            section.style.display = "block";
+
+            if (data.module_error || !data.modules) {
+                errMsg.innerText = data.module_error || "Per-module analysis unavailable.";
+                errMsg.style.display = 'block';
+                return;
+            }
+            errMsg.style.display = 'none';
+
+            const modules = data.modules;
+            const allValues = [];
+            modules.forEach(m => {
+                if (m.actual_soh !== null) allValues.push(m.actual_soh);
+                if (m.predicted_soh !== null) allValues.push(m.predicted_soh);
+            });
+            const domainMax = 100;
+            const domainMin = allValues.length ? Math.max(0, Math.floor(Math.min(...allValues)) - 3) : 0;
+            const span = Math.max(domainMax - domainMin, 1);
+
+            modules.forEach(m => {
+                const row = document.createElement('div');
+                row.className = 'module-row';
+                const isWeakestActual = m.module_idx === data.weakest_module_actual;
+                const isWeakestPred = m.module_idx === data.weakest_module_predicted;
+                if (isWeakestActual) row.classList.add('weakest');
+
+                const actualPct = m.actual_soh !== null ? Math.max(0, (m.actual_soh - domainMin) / span * 100) : 0;
+                const predPct = m.predicted_soh !== null ? Math.max(0, (m.predicted_soh - domainMin) / span * 100) : 0;
+                const actualTitle = m.actual_soh !== null
+                    ? `Actual SOH @ 0.3C: ${m.actual_soh}% / ${m.actual_capacity}Ah (${m.label_source || 'n/a'})` : 'Actual SOH: n/a';
+                const predTitle = m.predicted_soh !== null
+                    ? `Predicted SOH @ 0.3C: ${m.predicted_soh}% / ${m.predicted_capacity}Ah` : 'Predicted SOH: n/a';
+
+                let badges = '';
+                if (isWeakestActual) badges += '<span class="module-weakest-badge">WEAKEST</span>';
+                if (isWeakestPred && !isWeakestActual) badges += '<span class="module-weakest-badge predicted">PRED. WEAKEST</span>';
+
+                row.innerHTML = `
+                    <div class="module-label">Module ${m.module_idx}${badges}</div>
+                    <div class="module-bar-group">
+                        <div class="module-bar-track" title="${actualTitle}">
+                            <div class="module-bar-fill" style="width:${actualPct}%; background-color:#2563eb;"></div>
+                        </div>
+                        <div class="module-bar-value">${m.actual_soh !== null ? m.actual_soh.toFixed(2) + '% · ' + m.actual_capacity.toFixed(2) + 'Ah' : '--'}</div>
+                    </div>
+                    <div class="module-bar-group">
+                        <div class="module-bar-track" title="${predTitle}">
+                            <div class="module-bar-fill" style="width:${predPct}%; background-color:#dc2626;"></div>
+                        </div>
+                        <div class="module-bar-value">${m.predicted_soh !== null ? m.predicted_soh.toFixed(2) + '% · ' + m.predicted_capacity.toFixed(2) + 'Ah' : '--'}</div>
+                    </div>
+                `;
+                rowsContainer.appendChild(row);
+            });
+        }
+
+        async function analyzeCrossRate() {
+            const sftFile = document.getElementById('cr_sft_file').files[0];
+            const fftFile = document.getElementById('cr_fft_file').files[0];
+            const btn = document.getElementById('crAnalyzeBtn');
+            const loader = document.getElementById('crLoader');
+
+            if (!sftFile || !fftFile) {
+                alert("Please upload both a 1.0C SFT file and a 0.3C FFT file.");
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerText = "Predicting...";
+            loader.style.display = "block";
+            document.getElementById('crMetricsGrid').style.display = "none";
+            document.getElementById('crSection').style.display = "none";
+            document.getElementById('crPlotSection').style.display = "none";
+
+            const formData = new FormData();
+            formData.append('sft_file', sftFile);
+            formData.append('fft_file', fftFile);
+
+            try {
+                const response = await fetch('/analyze_cross_rate', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    document.getElementById('crSohValue').innerText = data.soh + "%";
+                    document.getElementById('crCapValue').innerText = data.capacity + " Ah";
+                    document.getElementById('crActualSohValue').innerText = data.actual_soh + "%";
+                    document.getElementById('crActualCapValue').innerText = data.actual_capacity + " Ah";
+
+                    renderCrossRateModules(data);
+
+                    if (data.plot) {
+                        document.getElementById('crPlotImage').src = "data:image/png;base64," + data.plot;
+                        document.getElementById('crPlotSection').style.display = "block";
+                    }
+
+                    document.getElementById('crMetricsGrid').style.display = "grid";
+                } else {
+                    alert("Error: " + data.error);
+                }
+            } catch (error) {
+                alert("An error occurred while predicting.");
+                console.error(error);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "Predict 0.3C SOH from 1.0C SFT";
+                loader.style.display = "none";
+            }
+        }
+
+        async function predictWeakestModule() {
+            const sftFile = document.getElementById('wm_sft_file').files[0];
+            const btn = document.getElementById('wmAnalyzeBtn');
+            const loader = document.getElementById('wmLoader');
+
+            if (!sftFile) {
+                alert("Please upload an SFT file.");
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerText = "Predicting...";
+            loader.style.display = "block";
+            document.getElementById('wmMetricsGrid').style.display = "none";
+            document.getElementById('wmPlotSection').style.display = "none";
+
+            const formData = new FormData();
+            formData.append('sft_file', sftFile);
+
+            try {
+                const response = await fetch('/analyze_weakest_module', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    document.getElementById('wmModuleValue').innerText = "Module " + data.weakest_module;
+
+                    const r32 = data.results["3.2"];
+                    const r25 = data.results["2.5"];
+                    document.getElementById('wm32Value').innerText = r32.capacity_ah + " Ah / " + r32.soh + "%";
+                    document.getElementById('wm25Value').innerText = r25.capacity_ah + " Ah / " + r25.soh + "%";
+
+                    document.getElementById('wmPlotImage').src = "data:image/png;base64," + data.plot;
+
+                    document.getElementById('wmMetricsGrid').style.display = "grid";
+                    document.getElementById('wmPlotSection').style.display = "block";
+                } else {
+                    alert("Error: " + data.error);
+                }
+            } catch (error) {
+                alert("An error occurred while predicting.");
+                console.error(error);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "Predict Weakest Module";
                 loader.style.display = "none";
             }
         }
