@@ -102,12 +102,15 @@ from curve_utils import (
     compute_soh, extract_and_resample_curve, extract_enhanced_features,
     detect_knee, get_cell_columns, module_cell_columns, N_MODULES,
     extract_module_features_from_slice, add_sibling_features, parse_pack_and_crate,
-    detect_settle_index,
+    detect_settle_index, is_full_curve_file,
 )
 from module_capacity_extrapolation import (
     find_crossing_index, estimate_module_capacity, estimate_module_capacity_at_targets, _interp_crossing_ah,
 )
-from build_module_dataset import load_module_templates
+from build_module_dataset import load_module_templates, DATA_FOLDER
+from raw_file_cleaner import clean_raw_file, RAW_UPLOADS_FOLDER
+
+os.makedirs(RAW_UPLOADS_FOLDER, exist_ok=True)
 
 # ==========================================
 # LOAD MODELS AT STARTUP
@@ -1204,6 +1207,74 @@ def analyze_weakest_module(sft_file: UploadFile | None = File(None)):
         print(f"❌ Error in analyze_weakest_module endpoint: {str(e)}")
         print(traceback.format_exc())
         return JSONResponse({'error': f'Server error: {str(e)}'}, status_code=500)
+
+
+@app.post('/upload_training_data')
+def upload_training_data(files: list[UploadFile] = File(...)):
+    """Training Pipeline: accepts one or more raw pack CSVs -- a single file,
+    several files, or an entire folder selected via the UI (webkitdirectory)
+    -- and cleans each one down to just its real discharge window (see
+    raw_file_cleaner.py for what "clean" means: dropping the pre-test
+    charge/rest and post-test rest/recharge sections). Each raw upload is
+    saved into RAW_UPLOADS_FOLDER for a record of what came in, and its
+    cleaned result is written straight into DATA_FOLDER -- ready for the
+    next retrain (see 'Retrain the models' in the README for what to run
+    next; this endpoint does NOT retrain anything itself).
+    """
+    results = []
+    for f in files:
+        # basename(), not the raw filename -- a folder upload's filename can
+        # carry the browser's full relative subfolder path (webkitRelativePath),
+        # and untouched that's also a directory-traversal risk against
+        # RAW_UPLOADS_FOLDER/DATA_FOLDER.
+        fname = os.path.basename((f.filename or '').replace('\\', '/'))
+        if not fname.lower().endswith('.csv'):
+            results.append({'filename': fname or '(unnamed)', 'status': 'skipped', 'reason': 'Not a .csv file'})
+            continue
+
+        raw_path = os.path.join(RAW_UPLOADS_FOLDER, fname)
+        try:
+            with open(raw_path, 'wb') as out:
+                out.write(f.file.read())
+
+            with open(raw_path) as raw_fh:
+                raw_row_count = sum(1 for _ in raw_fh) - 1  # minus header
+
+            pack_id, c_rate = parse_pack_and_crate(fname)
+            upper = fname.upper()
+            if is_full_curve_file(fname):
+                file_type = 'FFCT/FFT (full)'
+            elif 'SFT' in upper or 'SFCT' in upper:
+                file_type = 'SFT/SFCT (short)'
+            else:
+                file_type = 'unknown'
+
+            output_path = os.path.join(DATA_FOLDER, fname)
+            cleaned_df = clean_raw_file(raw_path, output_path)
+
+            results.append({
+                'filename': fname,
+                'status': 'cleaned',
+                'raw_rows': raw_row_count,
+                'cleaned_rows': len(cleaned_df),
+                'pack_id': pack_id,
+                'c_rate': c_rate,
+                'file_type': file_type,
+                'naming_warning': None if pack_id else (
+                    "Filename doesn't match the pkN + C-rate + FFCT/FFT/SFT/SFCT convention -- "
+                    "training scripts won't pick this file up until it does (see README)."
+                ),
+            })
+        except Exception as e:
+            results.append({'filename': fname, 'status': 'skipped', 'reason': str(e)})
+
+    cleaned_count = sum(1 for r in results if r['status'] == 'cleaned')
+    return JSONResponse({
+        'results': results,
+        'cleaned_count': cleaned_count,
+        'total_count': len(results),
+        'data_folder': DATA_FOLDER,
+    })
 
 
 if __name__ == '__main__':

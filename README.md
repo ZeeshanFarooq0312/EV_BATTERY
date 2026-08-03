@@ -103,9 +103,13 @@ This is fundamentally harder than same-rate prediction, and the model/UI are hon
 new_tech/
 ├── app.py                              # FastAPI web app (the interactive demo) — the only entry point
 │                                        # that matters for live serving
+├── run_full_pipeline.py                # ★ One-command retrain: prompts for a raw dataset folder,
+│                                        #   cleans it, retrains all 3 active models, prints a summary
 ├── templates/index.html                # Web UI
 ├── clean_data_for_test/OneDrive_.../   # THE active training data folder (all 6 packs, both C-rates)
-├── uploads/                            # File-upload scratch folder
+├── raw_uploads/                        # Drop zone for new raw CSVs awaiting cleaning (not read by
+│                                        #   any training script directly — see raw_file_cleaner.py)
+├── uploads/                            # File-upload scratch folder (live SFT/FFT inference uploads)
 │
 ├── ml_pipeline/
 │   ├── core/                           # Shared utilities imported by BOTH training and app.py at
@@ -118,6 +122,11 @@ new_tech/
 │   │   │                                #   real weakest-module template curves (load_module_templates)
 │   │   │                                #   + DATA_FOLDER (the single source of truth for where
 │   │   │                                #   every script reads raw CSVs from)
+│   │   ├── raw_file_cleaner.py         # Cleans a raw pack CSV (or a whole folder of them, e.g.
+│   │   │                                #   raw_uploads/) down to just the real discharge window —
+│   │   │                                #   the single source of truth for that cleaning step, used
+│   │   │                                #   by both the project-root new_raw_file.py CLI and (once
+│   │   │                                #   wired up) any future UI "add training data" upload route
 │   │   └── physics_calibration.py      # Single source of truth for every real-data-measured
 │   │                                    #   constant the synthetic generator uses
 │   │
@@ -162,8 +171,8 @@ new_tech/
 │   └── generated_outputs/              # *.png / diagnostic *.csv byproducts (gitignored — regenerate
 │                                        #   by re-running the diagnostics above, nothing here is source)
 │
-└── new_raw_file.py (project root)      # Cleans a raw pack CSV down to just the real discharge
-                                         # window (drops pre-test charge/rest and post-test rest)
+└── new_raw_file.py (project root)      # Backward-compat CLI wrapper around
+                                         # ml_pipeline/core/raw_file_cleaner.py -- prefer that module directly
 ```
 
 ## Data format
@@ -285,11 +294,69 @@ python get_actual_c_rate.py   # edit FOLDER_PATH at the top of the file first --
 
 ## Adding new training data
 
-1. Drop new raw CSVs into `clean_data_for_test/OneDrive_1_7-9-2026_CLEANED/` (or point `DATA_FOLDER` in `ml_pipeline/core/build_module_dataset.py` at a different folder — every training script imports `DATA_FOLDER` from there, so it only needs to change in one place).
-2. Filenames must follow the existing convention so `curve_utils.parse_pack_and_crate` can read them: contain `pkN` (pack ID) and a C-rate token like `1.0C`/`0.3C`/`1C` somewhere in the name, plus `FFCT`/`FFT` (full curve) or `SFT`/`SFCT` (short test) to mark the file type.
-3. If a new file is a raw, uncleaned export (still has pre-test charge/rest and post-test rest sections), run it through `new_raw_file.py` (project root) first.
-4. Re-run the three active training scripts (see [Retrain the models](#retrain-the-models)) and check their printed LOPO output. A genuinely new pack will also appear as a new fold in that LOPO loop automatically — no code change needed for it to be included.
-5. Restart `app.py`.
+### One-command pipeline (recommended for non-technical users)
+
+`run_full_pipeline.py` (project root of this app, `new_tech/`) does the whole thing in one go: cleaning + retraining all 3 active models, with no arguments to remember and no other files to touch.
+
+```bash
+cd new_tech
+python run_full_pipeline.py
+```
+
+It asks you one question — the path to your raw dataset folder — then:
+1. Cleans every CSV in that folder into the active training data folder (skips and reports any file it can't clean, e.g. a bad filename or a file that isn't really a discharge test, rather than stopping the whole run).
+2. Retrains all 3 active models one after another. Each training script already applies its own synthetic data augmentation automatically as part of training — there's no separate augmentation step.
+3. Prints a summary at the end: which files were cleaned/skipped and why, which models trained successfully (with the exact `.pkl` filenames it confirmed were written), and how long the whole run took. If one training script fails, the other two still run — the summary tells you which one needs attention.
+
+It does **not** restart the app automatically — the summary's last line always tells you to do that yourself (`python app.py`), since that's the step that actually puts the new models into use.
+
+Everything below this describes the same pipeline broken into its individual manual steps — useful if you want to clean a folder without retraining, retrain without adding new data, or run one specific script.
+
+### Manual steps — where files go and what to run
+
+```bash
+# 1. Put your new raw CSV(s) in new_tech/raw_uploads/ (create the folder if it doesn't exist yet),
+#    then clean them -- this trims each file down to just the real discharge window (drops the
+#    pre-test charge/rest and post-test rest sections) and writes the result straight into the
+#    active training data folder:
+cd new_tech/ml_pipeline/core
+python raw_file_cleaner.py ../../raw_uploads   # cleans every CSV in raw_uploads/ into DATA_FOLDER
+# (pass a single file path instead of a folder to clean just one file)
+
+# 2. Retrain the 3 active models, in any order:
+cd ../training
+python module_soh_train.py            # trains module_soh_model_{0_3c,1_0c}.pkl
+python module_curve_train.py          # trains module_curve_reconstruction_model_{0_3C,1_0C}.pkl
+python module_soh_cross_rate_train.py # trains module_soh_model_1_0c_to_0_3c.pkl
+
+# 3. Restart the app so it picks up the new .pkl files:
+cd ../..
+python app.py
+```
+
+Step by step, with the detail behind each part above:
+
+1. **Where the raw file goes**: drop new raw CSVs (still-unclean exports — see below) into `new_tech/raw_uploads/`, a scratch drop zone for files awaiting cleaning (not read by any training script directly). If a file is *already* cleaned (see step 3), you can skip the drop zone and copy it straight into `new_tech/clean_data_for_test/OneDrive_1_7-9-2026_CLEANED/` — that's the one folder every training script actually reads from (via `DATA_FOLDER` in `ml_pipeline/core/build_module_dataset.py`; change it there once to use a different folder entirely — every script imports it from that single place).
+2. **Filename convention**: `curve_utils.parse_pack_and_crate` reads pack ID and C-rate straight from the filename, so it must contain:
+   - `pkN` — the pack ID (e.g. `pk7` for a brand-new pack — new pack IDs work with no code changes, see step 5 below), and
+   - a C-rate token like `1.0C` / `0.3C` / `1C` somewhere in the name, and
+   - `FFCT` or `FFT` for a full/characterization test (ground truth, full curve to cutoff), **or** `SFT`/`SFCT` for a short test (the field-input-shaped file).
+   - Example: `pk7-45-01012027-FFCT-0.3C 202701011200 Characterisation Test.csv`
+3. **Raw vs. cleaned — what "clean" means**: compare any file in `BS_Data/` (raw) against the same pack/test in `new_tech/clean_data_for_test/OneDrive_1_7-9-2026_CLEANED/` (cleaned) to see the difference directly. A raw export bundles the pre-test charge, a rest period, the real discharge, and a post-test rest/recharge all in one file; "cleaning" means keeping **only the rows where the pack is actually discharging** (`LoadUnitCurrent` below a small negative threshold, for the longest contiguous run — see `find_discharge_block` in the script below) and adding the `min_v` column (row-wise min across all 108 `Cell NNN` columns) that every cleaned file already carries. If a file's `LoadUnitCurrent` column is already all-negative (no charge/rest sections), it's already clean — cleaning it again is harmless (it becomes a no-op trim, `min_v` gets added if missing).
+4. **How to clean it**: `ml_pipeline/core/raw_file_cleaner.py` does this — run it against a single raw file or a whole folder (e.g. `raw_uploads/`, cleaning every CSV in it in one pass) and it writes the cleaned CSV(s) straight into `DATA_FOLDER` by default:
+   ```bash
+   cd new_tech/ml_pipeline/core
+   python raw_file_cleaner.py path/to/one_raw_file.csv     # single file
+   python raw_file_cleaner.py path/to/a_folder_of_raw/      # every *.csv in that folder
+   python raw_file_cleaner.py ../../raw_uploads --output-dir some/other/folder   # override the output location
+   ```
+   (`new_raw_file.py` at the project root is kept only as a backward-compatible wrapper around this same module — prefer `raw_file_cleaner.py` directly.)
+
+   The same cleaning is also reachable as an API route, `POST /upload_training_data` (`app.py`) — accepts one or more files, cleans each with this same module, and reports per-file results as JSON. Not currently exposed anywhere in the web UI (CLI is the supported path for now); it's there for scripting/automation if needed.
+5. **Which scripts to run — all three, every time**: run all three active training scripts in [Retrain the models](#retrain-the-models) (order doesn't matter, no dependency between them). A brand-new `pkN` is automatically picked up as a new Leave-One-Pack-Out fold — nothing else to configure. Check each script's printed LOPO output against the numbers documented in this README/the script's own docstring before trusting the retrain.
+6. **Restart required**: `app.py` only loads `.pkl` models once at startup, so it must be restarted after any retrain — otherwise it keeps serving the old models from memory even though the files on disk changed.
+
+You do **not** need to touch the two legacy/disabled training scripts (`curve_train.py`, `soh_models_train.py`) unless you've specifically re-enabled those models in `app.py` (see [Disabled/legacy models](#disabledlegacy-models--kept-as-documented-fallback-not-loaded-by-apppy-by-default) above).
 
 ## Known limitations
 
