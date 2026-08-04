@@ -21,12 +21,12 @@ python app.py
 
 Then open **http://127.0.0.1:5000** in your browser.
 
-Upload a short-test file (SFT/SFCT) and a full-test file (FFCT/FFT) to see:
+The **Cross-Rate Prediction** section is what's currently shown on the page: upload only a 1.0C short-test file (SFT/SFCT) to predict every module's SOH/capacity at 0.3C, using a dedicated cross-rate model. Optionally add a 0.3C full-test file (FFCT/FFT) as well to validate the prediction against real ground truth. You'll see:
 - The weakest module in the pack
-- Its predicted capacity/SOH compared to the actual value
+- Its predicted capacity/SOH compared to the actual value (if a ground-truth file was uploaded)
 - Its full discharge curve, predicted vs. actual
 
-A **Cross-Rate Prediction** section further down the page lets you predict the same results at 0.3C using only a 1.0C short test.
+The **Same-Rate Analysis** tool (same idea, but SFT and FFT captured at the same C-rate) is currently hidden from the page, though the underlying model and code are still there — see [ARCHITECTURE.md](ARCHITECTURE.md#how-it-works-pipeline) for what it does and how to bring it back.
 
 ## Add new data & retrain the models
 

@@ -94,6 +94,7 @@ os.makedirs('uploads', exist_ok=True)
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 ML_PIPELINE_DIR = os.path.join(APP_DIR, 'ml_pipeline')
 MODELS_DIR = os.path.join(ML_PIPELINE_DIR, 'models')
+MODELS_LEGACY_DIR = os.path.join(ML_PIPELINE_DIR, 'models_legacy')  # disabled/legacy models -- see README
 sys.path.insert(0, os.path.join(ML_PIPELINE_DIR, 'core'))
 sys.path.insert(0, os.path.join(ML_PIPELINE_DIR, 'training'))
 
@@ -130,8 +131,8 @@ soh_feature_names = {}
 # for c_rate in [0.3, 1.0]:
 #     c_str = str(c_rate).replace('.', '_')
 #     try:
-#         soh_models[c_rate] = joblib.load(os.path.join(MODELS_DIR, f'soh_model_{c_str}c.pkl'))
-#         soh_feature_names[c_rate] = joblib.load(os.path.join(MODELS_DIR, f'feature_names_{c_str}c.pkl'))
+#         soh_models[c_rate] = joblib.load(os.path.join(MODELS_LEGACY_DIR, f'soh_model_{c_str}c.pkl'))
+#         soh_feature_names[c_rate] = joblib.load(os.path.join(MODELS_LEGACY_DIR, f'feature_names_{c_str}c.pkl'))
 #         print(f"✅ SOH model for {c_rate}C loaded")
 #     except Exception as e:
 #         print(f"❌ Error loading SOH model for {c_rate}C: {e}")
@@ -145,7 +146,7 @@ soh_feature_names = {}
 # (see reconstruct_full_curve() callers) so leaving these as None degrades
 # gracefully instead of crashing /analyze. Re-enable by uncommenting below.
 # try:
-#     recon_model_0_3c = joblib.load(os.path.join(MODELS_DIR, 'reconstruction_model_0_3C_v10_knee.pkl'))
+#     recon_model_0_3c = joblib.load(os.path.join(MODELS_LEGACY_DIR, 'reconstruction_model_0_3C_v10_knee.pkl'))
 #     print("✅ 0.3C reconstruction model (v10 knee) loaded")
 # except Exception as e:
 #     print(f"⚠️ 0.3C reconstruction model not found: {e}")
@@ -153,7 +154,7 @@ soh_feature_names = {}
 recon_model_0_3c = None
 
 # try:
-#     recon_model_1_0c = joblib.load(os.path.join(MODELS_DIR, 'reconstruction_model_1_0C_v10_knee.pkl'))
+#     recon_model_1_0c = joblib.load(os.path.join(MODELS_LEGACY_DIR, 'reconstruction_model_1_0C_v10_knee.pkl'))
 #     print("✅ 1.0C reconstruction model (v10 knee) loaded")
 # except Exception as e:
 #     print(f"⚠️ 1.0C reconstruction model not found: {e}")

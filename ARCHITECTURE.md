@@ -21,6 +21,8 @@ Because a pack's discharge always stops when its single weakest cell crosses the
 
 ## How it works (pipeline)
 
+> **UI status**: the Same-Rate Analysis section described immediately below is currently hidden in `templates/index.html` (wrapped in a `<div style="display:none">` right after the page header, with a comment marking exactly where it starts/ends) — only [Cross-Rate Prediction](#cross-rate-prediction-10c--03c) is visible on the page right now. The model, the `/analyze` route in `app.py`, and all the code below are unaffected and still fully working — only the HTML section is hidden. To bring it back: open `templates/index.html`, find the `<!-- Same-Rate Analysis: temporarily hidden. ... -->` comment, and remove that wrapper `<div style="display:none">` and its matching closing `</div>` (marked `<!-- end Same-Rate Analysis (display:none wrapper) -->`, right before the "Cross-Rate Tool" section divider).
+
 ```
 Uploaded SFT file (partial, tail-only) + FFT file (full, ground truth)
         │
@@ -169,7 +171,9 @@ new_tech/
 │   │                                    #   per C-rate — catches shape/level issues the statistical
 │   │                                    #   gate alone can miss
 │   │
-│   ├── models/                         # Every trained *.pkl artifact (active + legacy) — see Models below
+│   ├── models/                         # The 5 ACTIVE trained *.pkl artifacts only — see Models below
+│   ├── models_legacy/                  # Disabled/legacy *.pkl artifacts, kept out of models/ so they
+│   │                                    #   never get mixed up with what app.py actually loads
 │   └── generated_outputs/              # *.png / diagnostic *.csv byproducts (gitignored — regenerate
 │                                        #   by re-running the diagnostics above, nothing here is source)
 │
@@ -228,8 +232,8 @@ All five models below are **active** — loaded by `app.py` at startup and used 
 
 These are **not** part of the active pipeline (their loading code in `app.py` is commented out / hardcoded to `None`). They're kept because their training scripts still work and may be useful for comparison or as an emergency fallback — but training on new data should generally ignore these two and focus on the five active models above.
 
-- **Legacy pack-level SOH model** (`ml_pipeline/models/soh_model_{0_3c,1_0c}.pkl`) — predicts pack-level SOH directly (no per-module breakdown). Trained by `ml_pipeline/training/soh_models_train.py`. To re-enable: uncomment the `soh_models`/`soh_feature_names` loading block near the top of `app.py` (search for "1. Load SOH Models").
-- **Legacy pack-level curve reconstruction** (`ml_pipeline/models/reconstruction_model_{0_3C,1_0C}_v10_knee.pkl`) — reconstructs a pack-mean-voltage curve rather than a per-module one. Trained by `ml_pipeline/training/curve_train.py`. To re-enable: uncomment the `recon_model_0_3c`/`recon_model_1_0c` loading block near the top of `app.py` (search for "2. Load Reconstruction Models").
+- **Legacy pack-level SOH model** (`ml_pipeline/models_legacy/soh_model_{0_3c,1_0c}.pkl`) — predicts pack-level SOH directly (no per-module breakdown). Trained by `ml_pipeline/training/soh_models_train.py` (saves into `models_legacy/`, not `models/`). To re-enable: uncomment the `soh_models`/`soh_feature_names` loading block near the top of `app.py` (search for "1. Load SOH Models") — it already points at `MODELS_LEGACY_DIR`.
+- **Legacy pack-level curve reconstruction** (`ml_pipeline/models_legacy/reconstruction_model_{0_3C,1_0C}_v10_knee.pkl`) — reconstructs a pack-mean-voltage curve rather than a per-module one. Trained by `ml_pipeline/training/curve_train.py` (saves into `models_legacy/`, not `models/`). To re-enable: uncomment the `recon_model_0_3c`/`recon_model_1_0c` loading block near the top of `app.py` (search for "2. Load Reconstruction Models") — it already points at `MODELS_LEGACY_DIR`.
 
 ## GPU vs CPU for training
 

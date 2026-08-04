@@ -445,6 +445,13 @@
             <p>Upload your SFT and FFT files to analyze battery health and reconstruct the complete global discharge curve.</p>
         </header>
 
+        <!-- Same-Rate Analysis: temporarily hidden. Not wrapped in an HTML comment because
+             the metric-card blocks below already contain their own HTML comments, and HTML
+             comments don't nest -- display:none on this wrapper hides it instead, without
+             disturbing any element IDs the JS (analyzeBattery()) still refers to. Remove
+             this wrapper div (and its matching closing div right before the Cross-Rate Tool
+             section-divider) to bring it back. -->
+        <div style="display:none">
         <div class="tool-header">
             <h2>Same-Rate Analysis</h2>
             <p>Upload a partial SFT and a complete FFT captured at the <strong>same C-rate</strong> to predict per-module SOH and reconstruct the full discharge curve.</p>
@@ -551,6 +558,7 @@
             <div id="moduleRows"></div>
             <p class="module-error-msg" id="moduleErrorMsg"></p>
         </div>
+        </div><!-- end Same-Rate Analysis (display:none wrapper) -->
 
         <div class="section-divider"><span>Cross-Rate Tool</span></div>
 
