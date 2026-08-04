@@ -503,6 +503,20 @@ def reconstruct_cross_rate_module_curve(pack_id, pred_capacity_03c):
     return recon_ah, template_v
 
 
+def _interp_target_from_reconstructed_curve(recon_ah, recon_v, target_v):
+    """Where a shape-transferred (monotonic-by-construction, real-template)
+    curve crosses target_v -- plain interpolation, no tiered fallback needed
+    since this curve already spans the full 0-100% range by construction
+    (reconstruct_cross_rate_module_curve rescales a COMPLETE real template).
+    Returns None if target_v is outside the curve's observed voltage range."""
+    v, ah = np.asarray(recon_v), np.asarray(recon_ah)
+    if target_v > v[0] or target_v < v[-1]:
+        return None
+    # v is decreasing as ah increases (real discharge curve) -- np.interp
+    # needs its x-array increasing, so feed it both arrays reversed.
+    return float(np.interp(target_v, v[::-1], ah[::-1]))
+
+
 def analyze_modules(sft_df, fft_df, c_rate):
     """Per-module SOH: predicted from the uploaded (partial) SFT file via the
     module SOH model, and actual/ground-truth from the uploaded (full) FFT
@@ -580,7 +594,7 @@ def analyze_modules(sft_df, fft_df, c_rate):
     }, None
 
 
-def analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df):
+def analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df, pack_id=None):
     """Cross-rate per-module SOH: predicted 0.3C SOH from features extracted
     from an uploaded 1.0C-bucket SFT file (module_soh_cross_rate_train.py's
     model), and actual/ground-truth 0.3C SOH from an uploaded 0.3C FFT file
@@ -588,7 +602,20 @@ def analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df):
     only difference from analyze_modules is that the SFT and FFT here are
     deliberately different C-rates (1.0C source, 0.3C target), not the same
     rate compared against itself. Returns (result_dict, error_message) --
-    exactly one is None."""
+    exactly one is None.
+
+    Also computes capacity/SOH at the two FIXED voltage cutoffs (3.25V, 2.5V)
+    for every module, same idea as analyze_modules's target_cutoffs -- but
+    the "predicted" side can't use analyze_modules's tiered-extrapolation
+    method directly: there's no 0.3C voltage trace at all at inference time
+    (only a 1.0C SFT), which is the whole reason cross-rate needs shape
+    transfer in the first place (see reconstruct_cross_rate_module_curve).
+    So "predicted @ cutoff" here means: build that same shape-transferred
+    0.3C curve for THIS module (real template shape, rescaled to this
+    module's own predicted capacity), then read off where it crosses each
+    target voltage. "actual @ cutoff" still uses the real tiered-
+    extrapolation method against the uploaded 0.3C FFT, exactly like
+    analyze_modules, since that ground truth IS a real 0.3C curve."""
     if module_soh_model_cross_rate is None:
         return None, "Cross-rate module SOH model not available"
 
@@ -639,6 +666,50 @@ def analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df):
             actual_capacity[m] = capacity_ah
             label_source[m] = source
 
+    # Capacity/SOH at the two fixed voltage cutoffs (3.25V, 2.5V), per module.
+    target_cutoffs = [3.25, 2.5]
+    cr_template_ah, cr_template_v = pick_template_curve(pack_id, 0.3)  # for the ACTUAL side's Tier-2 fallback
+    targets_by_module = {}
+    for m in range(1, N_MODULES + 1):
+        if m not in predicted:
+            continue
+        module_targets = {}
+
+        # Predicted: shape-transfer this module's own real-template curve
+        # (same technique as reconstruct_cross_rate_module_curve, applied
+        # per-module here) to its own predicted capacity, then read off
+        # where it crosses each target voltage.
+        pred_capacity_m = predicted[m] / 100.0 * NOMINAL_CAPACITY
+        pred_recon_ah, pred_recon_v = None, None
+        try:
+            pred_recon_ah, pred_recon_v = reconstruct_cross_rate_module_curve(pack_id, pred_capacity_m)
+        except Exception as e:
+            print(f"⚠️ [cross-rate] Per-target curve reconstruction unavailable for module {m}: {e}")
+
+        # Actual: real tiered extrapolation against the uploaded 0.3C FFT --
+        # exactly analyze_modules's method, since this ground truth IS a
+        # real 0.3C curve.
+        actual_targets = {}
+        if m in modules:
+            actual_targets, _tail_ah, _tail_v = estimate_module_capacity_at_targets(
+                ah, modules[m]['min_v'], target_cutoffs, template_ah=cr_template_ah, template_v=cr_template_v,
+            )
+
+        for cv in target_cutoffs:
+            pred_entry = None
+            if pred_recon_v is not None:
+                cap_ah = _interp_target_from_reconstructed_curve(pred_recon_ah, pred_recon_v, cv)
+                if cap_ah is not None:
+                    pred_entry = {'capacity_ah': round(cap_ah, 2), 'soh': round(compute_soh(cap_ah), 2)}
+
+            actual_entry = None
+            if cv in actual_targets:
+                cap_ah, source, _diag = actual_targets[cv]
+                actual_entry = {'capacity_ah': round(cap_ah, 2), 'soh': round(compute_soh(cap_ah), 2), 'source': source}
+
+            module_targets[str(cv)] = {'predicted': pred_entry, 'actual': actual_entry}
+        targets_by_module[m] = module_targets
+
     modules_result = [{
         'module_idx': m,
         'predicted_soh': round(predicted[m], 2) if m in predicted else None,
@@ -646,6 +717,7 @@ def analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df):
         'predicted_capacity': round(predicted[m] / 100.0 * NOMINAL_CAPACITY, 2) if m in predicted else None,
         'actual_capacity': round(actual_capacity[m], 2) if m in actual_capacity else None,
         'label_source': label_source.get(m),
+        'targets': targets_by_module.get(m),
     } for m in range(1, N_MODULES + 1)]
 
     return {
@@ -653,6 +725,7 @@ def analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df):
         'weakest_module_predicted': min(predicted, key=predicted.get) if predicted else None,
         'weakest_module_actual': min(actual, key=actual.get) if actual else None,
     }, None
+
 
 
 # ==========================================
@@ -740,7 +813,7 @@ def analyze(sft_file: UploadFile | None = File(None), fft_file: UploadFile | Non
             print(f"⚠️ Pack-level reconstruction unavailable (disabled for this test run): {e}")
             recon_ah, recon_v, cutoff_ah = None, None, None
 
-        # Weakest-module capacity/SOH at BOTH fixed cutoffs (3.2V, 2.5V) --
+        # Weakest-module capacity/SOH at BOTH fixed cutoffs (3.25V, 2.5V) --
         # predicted from the SFT (same tiered extrapolation as
         # /analyze_weakest_module) and, since this route has the FFT ground
         # truth too, the actual value measured the SAME way directly from the
@@ -755,7 +828,7 @@ def analyze(sft_file: UploadFile | None = File(None), fft_file: UploadFile | Non
             pack_id, _ = parse_pack_and_crate(sft_file.filename)
             c_bucket = 1.0 if c_rate >= 0.9 else 0.3
             template_ah, template_v = pick_template_curve(pack_id, c_bucket)
-            target_cutoffs = [3.2, 2.5]
+            target_cutoffs = [3.25, 2.5]
 
             sft_mod_ah, _sft_pack_v, _sft_cell_std, sft_modules = extract_and_resample_curve(sft_df, want_modules=True)
             module_v_sft = sft_modules[target_module]['min_v']
@@ -843,7 +916,7 @@ def analyze(sft_file: UploadFile | None = File(None), fft_file: UploadFile | Non
 
             # plt.plot(ah_global_settled, v_settled, label=f'Module {target_module} (Observed, SFT)', color='#2563eb', linewidth=2.5)
 
-            marker_colors = {3.2: '#f59e0b', 2.5: '#a855f7'}
+            marker_colors = {3.25: '#f59e0b', 2.5: '#a855f7'}
             for cv in target_cutoffs:
                 color = marker_colors.get(cv, '#f59e0b')
                 plt.scatter([pred_results[cv]['capacity_ah']], [cv], color=color, s=150, zorder=5, marker='o',
@@ -949,7 +1022,8 @@ def analyze_cross_rate(sft_file: UploadFile | None = File(None), fft_file: Uploa
             print(f"⚠️ [cross-rate] SFT file's own C-rate ({sft_c_rate}) doesn't look like 1.0C -- "
                   f"this model was only trained/validated for a 1.0C-bucket source file.")
 
-        module_result, module_error = analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df)
+        pack_id, _ = parse_pack_and_crate(sft_file.filename)
+        module_result, module_error = analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df, pack_id=pack_id)
         if module_error:
             print(f"⚠️ [cross-rate] Module analysis failed: {module_error}")
             return JSONResponse({'error': module_error}, status_code=400)
@@ -978,7 +1052,6 @@ def analyze_cross_rate(sft_file: UploadFile | None = File(None), fft_file: Uploa
         target_module = module_result['weakest_module_predicted']
         if target_module is not None:
             try:
-                pack_id, _ = parse_pack_and_crate(sft_file.filename)
                 module_pred_capacity = next(
                     m['predicted_capacity'] for m in module_result['modules'] if m['module_idx'] == target_module
                 )
@@ -1033,7 +1106,7 @@ def analyze_cross_rate(sft_file: UploadFile | None = File(None), fft_file: Uploa
 def analyze_weakest_module(sft_file: UploadFile | None = File(None)):
     """SFT-only: identifies the weakest module from the uploaded (partial) SFT
     file via the module SOH model, then estimates that module's own capacity
-    and SOH at two fixed voltage cutoffs (3.2V, 2.5V) via the tiered physics
+    and SOH at two fixed voltage cutoffs (3.25V, 2.5V) via the tiered physics
     extrapolation in module_capacity_extrapolation.py -- no FFT ground-truth
     file required, since that method only needs a template curve (borrowed
     from the pack's own or a cross-pack real full-curve test) rather than this
@@ -1098,7 +1171,7 @@ def analyze_weakest_module(sft_file: UploadFile | None = File(None)):
         # fix here at module granularity: anchor on this module's OWN
         # predicted capacity (from the module SOH model above) so the local
         # SFT Ah axis lines up with true full-curve Ah. Verified against a
-        # real FFT ground truth (pk4 module 7): without this offset, @3.2V/
+        # real FFT ground truth (pk4 module 7): without this offset, @3.25V/
         # @2.5V capacity came out at 76/82 Ah (SOH ~49%/53%) vs the true
         # 140/145 Ah (SOH ~90%/93%) -- a silent, badly wrong result.
         module_anchor_capacity = (predicted_soh[weakest_module] / 100.0) * NOMINAL_CAPACITY
@@ -1111,7 +1184,7 @@ def analyze_weakest_module(sft_file: UploadFile | None = File(None)):
             return JSONResponse({'error': 'No template curve available for extrapolation.'}, status_code=500)
         template_used = 'pack_own' if (pack_id, c_bucket) in MODULE_TEMPLATES else 'cross_pack_fallback'
 
-        target_cutoffs = [3.2, 2.5]
+        target_cutoffs = [3.25, 2.5]
         targets, tail_ah, tail_v = estimate_module_capacity_at_targets(
             ah, module_v, target_cutoffs, template_ah=template_ah, template_v=template_v,
         )
@@ -1174,7 +1247,7 @@ def analyze_weakest_module(sft_file: UploadFile | None = File(None)):
             plt.plot(tail_ah_global[order], tail_v[order], label='Extrapolated Tail (physics-based)',
                      color='#dc2626', linewidth=2, linestyle='--')
 
-        marker_colors = {3.2: '#f59e0b', 2.5: '#a855f7'}
+        marker_colors = {3.25: '#f59e0b', 2.5: '#a855f7'}
         for cv, res in results.items():
             plt.scatter([res['capacity_ah']], [cv], color=marker_colors.get(cv, '#f59e0b'), s=150, zorder=5,
                         marker='o', edgecolors='white', linewidths=2,

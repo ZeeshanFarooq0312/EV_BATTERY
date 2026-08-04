@@ -25,6 +25,7 @@ The **Cross-Rate Prediction** section is what's currently shown on the page: upl
 - The weakest module in the pack
 - Its predicted capacity/SOH compared to the actual value (if a ground-truth file was uploaded)
 - Its full discharge curve, predicted vs. actual
+- For every module: predicted vs. actual capacity/SOH at the two standard voltage cutoffs, **3.25V and 2.5V**
 
 The **Same-Rate Analysis** tool (same idea, but SFT and FFT captured at the same C-rate) is currently hidden from the page, though the underlying model and code are still there — see [ARCHITECTURE.md](ARCHITECTURE.md#how-it-works-pipeline) for what it does and how to bring it back.
 

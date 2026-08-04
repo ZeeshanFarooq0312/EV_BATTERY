@@ -327,7 +327,7 @@ def estimate_module_capacity(ah, module_v, cutoff_v, template_ah=None, template_
 def estimate_module_capacity_at_targets(ah, module_v, target_cutoffs, template_ah=None, template_v=None,
                                          n_tail_points=60, **kwargs):
     """Same tiered method as estimate_module_capacity, evaluated at several
-    target cutoff voltages (e.g. [3.2, 2.5]) plus a dense extrapolated tail
+    target cutoff voltages (e.g. [3.25, 2.5]) plus a dense extrapolated tail
     curve for plotting -- built by re-evaluating that SAME fit at intermediate
     cutoff voltages, so the plotted tail and the reported target points are
     exactly consistent with each other (same underlying fit, just sampled more

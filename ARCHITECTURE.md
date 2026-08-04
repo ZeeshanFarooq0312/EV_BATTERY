@@ -8,7 +8,7 @@ A full characterization test (**FFCT** — Full Function/Characterisation Test) 
 
 This project trains models to go from a short test to:
 1. Which of the pack's 9 modules is **weakest** (in a series-connected pack, the whole pack's capacity is set by its weakest module — not an average across modules),
-2. That module's **SOH / capacity at fixed voltage cutoffs** (3.2V and 2.5V), and
+2. That module's **SOH / capacity at fixed voltage cutoffs** (3.25V and 2.5V), and
 3. Its reconstructed **complete voltage-vs-capacity discharge curve**, including the **discharge knee** — the sharp voltage drop near end-of-discharge.
 
 ...and, via a separate dedicated model, the same weakest-module SOH/capacity/curve reconstruction **at 0.3C from a 1.0C-only short test** (see [Cross-rate prediction](#cross-rate-prediction-10c--03c) below).
@@ -39,7 +39,7 @@ Uploaded SFT file (partial, tail-only) + FFT file (full, ground truth)
 │ Tiered capacity            │  measured (if the module's curve reaches the
 │ extrapolation               │  target cutoff) → self-extrapolated exponential
 │ (module_capacity_           │  decay → cross-module shape-transfer fallback
-│ extrapolation.py)           │  → capacity/SOH at 3.2V AND 2.5V, from the SFT
+│ extrapolation.py)           │  → capacity/SOH at 3.25V AND 2.5V, from the SFT
 └─────────────┬───────────────┘  (predicted) and the FFT (actual ground truth)
               │
               ▼
@@ -87,11 +87,13 @@ This is fundamentally harder than same-rate prediction, and the model/UI are hon
 - When two modules are genuinely near-tied in real capacity (sub-1-point margins), **which one a single real 1.0C test session calls "weakest" can flip** between two otherwise-valid captures of the same physical pack (confirmed on pk4: two real 1.0C sessions three weeks apart, ~6°C apart in pack temperature, disagree on whether module 1 or module 7 is weaker). This is a property of the physical pack and test-to-test measurement noise, not a model defect — see `module_soh_cross_rate_train.py`'s docstring for the full investigation, including two tried-and-reverted attempts to fix it (adding temperature and actual measured current as features — see `get_actual_c_rate.py` — neither survived validation).
 - **Trained by**: `ml_pipeline/training/module_soh_cross_rate_train.py`, using `ml_pipeline/training/module_perturbation_generator.py` for synthetic augmentation (each synthetic instance is a real (pack, module) curve pair, lightly rescaled + noised — anchored to real data by construction, not synthesized from scratch).
 
+**Capacity/SOH at fixed voltage cutoffs (3.25V, 2.5V), per module** (`analyze_modules_cross_rate()` in `app.py`): same idea as the same-rate route's `target_cutoffs`, but the "predicted" side can't reuse that route's tiered-extrapolation method — there's no 0.3C voltage trace at all at inference time (only the 1.0C SFT), the same constraint that makes the plot above need shape transfer in the first place. So "predicted @ cutoff" here means: build that same shape-transferred 0.3C curve for THIS module (`reconstruct_cross_rate_module_curve`, applied per-module rather than just for the weakest one), then read off where it crosses each target voltage (`_interp_target_from_reconstructed_curve` — plain interpolation, no tiered fallback needed since a shape-transferred curve already spans the full 0–100% range by construction). "Actual @ cutoff" (when a 0.3C FFT is uploaded) still uses the real tiered-extrapolation method (`estimate_module_capacity_at_targets`) against that FFT directly, exactly like the same-rate route, since that ground truth IS a real 0.3C curve.
+
 ## Key concepts
 
 - **SOH formula**: `SOH % = (capacity_Ah / NOMINAL_CAPACITY) * 100`, where `NOMINAL_CAPACITY = 156.0 Ah`.
 - **Weakest module = pack bottleneck**: in a series string, pack-level `AHDischarge` numerically equals the weakest module's own capacity. This is why the module SOH model's headline "pack SOH" is `min()` across its 9 module predictions, not an average.
-- **Two voltage cutoffs, one pass**: 3.2V (a partial/usable-range cutoff) and 2.5V (near-total depletion, essentially where the FFT test itself stops) are both computed from a single tiered-extrapolation call — no need to pick one upfront.
+- **Two voltage cutoffs, one pass**: 3.25V (a partial/usable-range cutoff) and 2.5V (near-total depletion, essentially where the FFT test itself stops) are both computed from a single tiered-extrapolation call — no need to pick one upfront.
 - **SFT Ah-axis offset**: SFT files are tail-only captures — their `AHDischarge` is zeroed at wherever that short test happened to start, not at full charge. Every module-level SFT computation anchors on that module's own predicted capacity (`ah_offset = predicted_capacity - sft_local_span`) to align the local axis to the true global one.
 - **IR-drop/relaxation transient**: SFT tests start from a rested state, producing a brief, real (not noise) sharp voltage sag that settles into the normal gentle plateau slope. `curve_utils.detect_settle_index` trims this before using SFT data as a curve-reconstruction anchor, so the predicted/observed join doesn't show an artificial spike.
 - **Tail-protected smoothing**: `app.py`'s `_smooth_checkpoints` median-filters the reconstructed curve to remove noise, but excludes the last `tail_protect` (default 5) checkpoints from that filter. The steep discharge knee near end-of-life is a genuine feature, not noise — median-filtering it flattened the knee into a "step then plunge" artifact, so the tail is now left untouched.
