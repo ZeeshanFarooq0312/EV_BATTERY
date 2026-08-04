@@ -93,10 +93,17 @@ os.makedirs('uploads', exist_ok=True)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 ML_PIPELINE_DIR = os.path.join(APP_DIR, 'ml_pipeline')
-MODELS_DIR = os.path.join(ML_PIPELINE_DIR, 'models')
 MODELS_LEGACY_DIR = os.path.join(ML_PIPELINE_DIR, 'models_legacy')  # disabled/legacy models -- see README
 sys.path.insert(0, os.path.join(ML_PIPELINE_DIR, 'core'))
 sys.path.insert(0, os.path.join(ML_PIPELINE_DIR, 'training'))
+
+from model_versioning import resolve_active_models_dir
+
+# Picks the highest-numbered ml_pipeline/models/vN/ folder automatically,
+# unless ml_pipeline/models/ACTIVE_VERSION pins it to a specific one -- see
+# model_versioning.py.
+MODELS_DIR, MODELS_VERSION = resolve_active_models_dir()
+print(f"Using models version: {MODELS_VERSION or '(unversioned models/ folder)'} ({MODELS_DIR})")
 
 from curve_utils import (
     NOMINAL_CAPACITY, HEAD_CHECKPOINTS_PCT, SFT_SAMPLE_FRACTIONS,
@@ -667,8 +674,14 @@ def analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df, pack_id=None):
             label_source[m] = source
 
     # Capacity/SOH at the two fixed voltage cutoffs (3.25V, 2.5V), per module.
+    # Tier-2 fallback template for the ACTUAL side: pick_template_curve() reads
+    # from MODULE_TEMPLATES, which is intentionally left empty right now (see
+    # "TEMPORARILY DISABLED for a test run" above) -- that made this always
+    # resolve to (None, None), so any module without a Tier-0/Tier-1 result
+    # raised an uncaught error and crashed the whole request. Use the
+    # already-loaded, always-populated cross-rate 0.3C templates instead.
     target_cutoffs = [3.25, 2.5]
-    cr_template_ah, cr_template_v = pick_template_curve(pack_id, 0.3)  # for the ACTUAL side's Tier-2 fallback
+    cr_template_ah, cr_template_v = pick_cross_rate_template(pack_id)
     targets_by_module = {}
     for m in range(1, N_MODULES + 1):
         if m not in predicted:
@@ -691,9 +704,12 @@ def analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df, pack_id=None):
         # real 0.3C curve.
         actual_targets = {}
         if m in modules:
-            actual_targets, _tail_ah, _tail_v = estimate_module_capacity_at_targets(
-                ah, modules[m]['min_v'], target_cutoffs, template_ah=cr_template_ah, template_v=cr_template_v,
-            )
+            try:
+                actual_targets, _tail_ah, _tail_v = estimate_module_capacity_at_targets(
+                    ah, modules[m]['min_v'], target_cutoffs, template_ah=cr_template_ah, template_v=cr_template_v,
+                )
+            except Exception as e:
+                print(f"⚠️ [cross-rate] Actual-side target capacity unavailable for module {m}: {e}")
 
         for cv in target_cutoffs:
             pred_entry = None

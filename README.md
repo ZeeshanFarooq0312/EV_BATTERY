@@ -46,7 +46,9 @@ This will:
 
 It automatically installs any missing packages, and automatically uses your computer's GPU for faster training if one is available (otherwise it uses the CPU).
 
-**After it finishes, restart the app** (`python app.py`) so it starts using the newly trained models.
+Each run saves its models into a new, numbered folder (`ml_pipeline/models/v2/`, `v3/`, ...) instead of overwriting the previous ones, so nothing is ever lost. **After it finishes, restart the app** (`python app.py`) — it always picks up the newest version automatically.
+
+If a new retrain turns out worse, you don't need to retrain again to undo it: open `ml_pipeline/models/ACTIVE_VERSION` and put the older version's name in it (e.g. `v1`), then restart the app. It'll keep using that version until you change it back to `latest`.
 
 ## Project structure
 
@@ -58,6 +60,10 @@ new_tech/
 ├── clean_data_for_test/    # Training data currently in use
 ├── raw_uploads/            # Drop new raw data files here before cleaning
 └── ml_pipeline/            # Training scripts, saved models, and shared code
+    └── models/
+        ├── ACTIVE_VERSION  # Which version to use -- "latest" (default) or a specific one like "v1"
+        ├── v1/             # Each retrain adds a new version folder like this one; older ones are kept
+        └── v2/
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full breakdown of every file and how the models work.

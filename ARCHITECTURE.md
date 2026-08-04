@@ -133,6 +133,9 @@ new_tech/
 │   │   │                                #   wired up) any future UI "add training data" upload route
 │   │   ├── compute_device.py           # Picks GPU (CUDA) if usable, else CPU with every core —
 │   │   │                                #   single source of truth, used by all 3 active training scripts
+│   │   ├── model_versioning.py         # Resolves which models/vN/ folder app.py should load from
+│   │   │                                #   (latest, or a pinned version), and hands training scripts
+│   │   │                                #   a fresh version folder to save into — see "Model versioning"
 │   │   └── physics_calibration.py      # Single source of truth for every real-data-measured
 │   │                                    #   constant the synthetic generator uses
 │   │
@@ -173,7 +176,12 @@ new_tech/
 │   │                                    #   per C-rate — catches shape/level issues the statistical
 │   │                                    #   gate alone can miss
 │   │
-│   ├── models/                         # The 5 ACTIVE trained *.pkl artifacts only — see Models below
+│   ├── models/                         # Versioned trained *.pkl artifacts — see Models below and
+│   │   │                                # "Model versioning"
+│   │   ├── ACTIVE_VERSION              # "latest" (default, auto-picks the highest vN) or a pinned
+│   │   │                                #   version name like "v1" — see model_versioning.py
+│   │   ├── v1/                         # One full set of the 5 active models, from one training run
+│   │   └── v2/                         # ... each retrain adds a new vN folder; older ones untouched
 │   ├── models_legacy/                  # Disabled/legacy *.pkl artifacts, kept out of models/ so they
 │   │                                    #   never get mixed up with what app.py actually loads
 │   └── generated_outputs/              # *.png / diagnostic *.csv byproducts (gitignored — regenerate
@@ -210,6 +218,17 @@ All curve extraction filters to the valid discharge window (`2.0V < mean cell vo
 ## Models
 
 All five models below are **active** — loaded by `app.py` at startup and used live. Each is retrained independently (no ordering dependency between them); see [README.md's retrain instructions](README.md#add-new-data--retrain-the-models).
+
+### Model versioning
+
+Every full retrain (`run_full_pipeline.py`, or the 3 training scripts run together by hand) writes its output into a new folder, `ml_pipeline/models/v1/`, `v2/`, `v3/`, ... — never overwriting a previous version's files. This means a retrain that turns out worse than the previous one doesn't destroy anything; the old version is still sitting there.
+
+- **`app.py` picks the highest-numbered version automatically** every time it starts (see `resolve_active_models_dir()` in `ml_pipeline/core/model_versioning.py`), printing which one it picked (`Using models version: v2 (...)`) as it starts up.
+- **To pin it to a specific version instead** (e.g. roll back after a bad retrain, or A/B compare two versions), put that version's name — just `v1`, nothing else — into `ml_pipeline/models/ACTIVE_VERSION`, then restart the app. It stays pinned to that version, even through later retrains adding `v3`, `v4`, etc., until `ACTIVE_VERSION` is changed back to `latest` (or the file is deleted).
+- **Running a training script standalone** (not via `run_full_pipeline.py`) also creates its own new version folder, via `get_training_output_dir()` — unless the `EV_MODEL_OUTPUT_DIR` environment variable is set, which is how `run_full_pipeline.py` makes all 3 scripts in one pipeline run land in the *same* new version folder instead of 3 separate ones.
+- Each version folder also gets a `TRAINED_AT.txt` recording when it was created.
+
+Below, model paths are written without the version folder (e.g. `ml_pipeline/models/module_soh_model_{0_3c,1_0c}.pkl`) since the filenames themselves don't change between versions — only which `vN/` folder they live in.
 
 ### Module SOH model (`ml_pipeline/models/module_soh_model_{0_3c,1_0c}.pkl`) — same-rate, primary
 
@@ -260,7 +279,7 @@ python curve_train.py        # trains reconstruction_model_{0_3C,1_0C}_v10_knee.
 python soh_models_train.py   # trains soh_model_{0_3c,1_0c}.pkl
 ```
 
-Every one of the above saves its `.pkl` output(s) into `ml_pipeline/models/`. Each script prints its own Leave-One-Pack-Out validation as it runs — check that output against the numbers documented in this file / the script's own docstring before trusting a retrain. **`app.py` only loads models at process startup — restart it after any retrain, or it will keep silently serving the old model from memory.**
+The 3 active scripts each save their `.pkl` output(s) into a **new** `ml_pipeline/models/vN/` folder (see "Model versioning" above) — run standalone like this (not via `run_full_pipeline.py`), each one gets its *own* new version folder rather than sharing one, so a version may end up with only 1 or 2 of the 5 active model files in it if you only run one script. The legacy scripts save into `ml_pipeline/models_legacy/` as before (not versioned). Each script prints its own Leave-One-Pack-Out validation as it runs — check that output against the numbers documented in this file / the script's own docstring before trusting a retrain. **`app.py` only loads models at process startup — restart it after any retrain, or it will keep silently serving the old model from memory.**
 
 ### Run validation gates
 

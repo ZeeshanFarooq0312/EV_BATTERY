@@ -14,6 +14,12 @@ are skipped and reported at the end rather than stopping the whole run; the
 3 training scripts are independent of each other, so if one fails the other
 two still run, and the failure is reported in the final summary.
 
+Each run saves its models into a new, numbered version folder
+(ml_pipeline/models/v2/, v3/, ...) instead of overwriting the previous
+one, so an older working set of models is never lost. app.py always uses
+the newest version automatically once restarted -- see
+ml_pipeline/core/model_versioning.py to pin it to an older version instead.
+
 Does NOT restart app.py automatically -- restart it yourself afterward
 (printed as the final instruction) to actually start serving the new
 models; app.py only loads models once at startup.
@@ -86,12 +92,12 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 ML_PIPELINE_DIR = os.path.join(APP_DIR, 'ml_pipeline')
 CORE_DIR = os.path.join(ML_PIPELINE_DIR, 'core')
 TRAINING_DIR = os.path.join(ML_PIPELINE_DIR, 'training')
-MODELS_DIR = os.path.join(ML_PIPELINE_DIR, 'models')
 
 sys.path.insert(0, CORE_DIR)
 from raw_file_cleaner import clean_all_uploads, DATA_FOLDER  # noqa: E402
+from model_versioning import create_new_version_dir  # noqa: E402
 
-# (training script filename, model files it should produce in MODELS_DIR)
+# (training script filename, model files it should produce in this run's version folder)
 TRAINING_SCRIPTS = [
     ('module_soh_train.py', [
         'module_soh_model_0_3c.pkl', 'module_soh_model_1_0c.pkl',
@@ -135,17 +141,26 @@ def run_training_step():
     print("STEP 2/2: Training models (each script applies its own synthetic")
     print("data augmentation automatically -- no separate step needed)")
     print("=" * 70)
+
+    # One new version folder for this whole run -- all 3 scripts save into
+    # it (via the EV_MODEL_OUTPUT_DIR env var) instead of each creating
+    # their own. The previous version(s) are left untouched, so a bad
+    # retrain never destroys a known-good set of models.
+    version_dir, version_name = create_new_version_dir()
+    print(f"Saving this run's models into a new version: {version_name} ({version_dir})")
+    env = dict(os.environ, EV_MODEL_OUTPUT_DIR=version_dir)
+
     outcomes = []
     for script_name, expected_outputs in TRAINING_SCRIPTS:
         print(f"\n--- Running {script_name} ---")
         script_path = os.path.join(TRAINING_DIR, script_name)
-        result = subprocess.run([sys.executable, script_path], cwd=TRAINING_DIR)
+        result = subprocess.run([sys.executable, script_path], cwd=TRAINING_DIR, env=env)
         ok = result.returncode == 0
         outcomes.append((script_name, ok, expected_outputs))
         if not ok:
             print(f"!! {script_name} exited with an error (code {result.returncode}) -- "
                   f"see output above. Continuing with the next script.")
-    return outcomes
+    return outcomes, version_dir, version_name
 
 
 def main():
@@ -160,7 +175,7 @@ def main():
         print("\nNo files were cleaned successfully -- nothing to train on. Stopping.")
         sys.exit(1)
 
-    outcomes = run_training_step()
+    outcomes, version_dir, version_name = run_training_step()
     elapsed_min = (time.time() - start_time) / 60
 
     print("\n" + "=" * 70)
@@ -173,7 +188,7 @@ def main():
         for fname, status in skipped:
             print(f"  - {fname}: {status}")
 
-    print("\nModel training:")
+    print(f"\nModel training (saved into version {version_name}: {version_dir}):")
     any_failed = False
     for script_name, ok, expected_outputs in outcomes:
         print(f"  [{'OK' if ok else 'FAILED'}] {script_name}")
@@ -181,19 +196,23 @@ def main():
             any_failed = True
             continue
         for out_file in expected_outputs:
-            exists = os.path.exists(os.path.join(MODELS_DIR, out_file))
+            exists = os.path.exists(os.path.join(version_dir, out_file))
             print(f"      -> {out_file}: {'saved' if exists else 'MISSING -- check output above'}")
 
     print(f"\nTotal time: {elapsed_min:.1f} minutes")
 
     if any_failed:
         print("\nOne or more training scripts failed -- scroll up for the error, fix it, and re-run this script.")
+        print(f"(Whatever DID save landed in {version_name} -- your previous, already-working version is untouched.)")
     else:
         print("\nAll models retrained successfully.")
 
-    print("\nNEXT STEP -- restart the app so it picks up the new models:")
+    print(f"\nNEXT STEP -- restart the app so it picks up the new models ({version_name}):")
     print("  cd new_tech")
     print("  python app.py")
+    print(f"\nThe app always uses the newest version automatically, so it will pick up {version_name} on its own.")
+    print("If the new version turns out worse, roll back without retraining anything: put the old")
+    print("version's name (e.g. \"v1\") into ml_pipeline/models/ACTIVE_VERSION and restart the app.")
 
 
 if __name__ == '__main__':

@@ -41,6 +41,7 @@ from curve_train import (
     generate_synthetic_curve, build_rows_from_curve, CUTOFF_PCTS, SYNTH_CURVES_PER_CRATE,
 )  # noqa: F401 (CUTOFF_PCTS re-exported for callers)
 from compute_device import get_xgb_device_params
+from model_versioning import get_training_output_dir
 
 # curve_train.py's own CUTOFF_PCTS only spans 0.20-0.90 (tuned for its ~54
 # real pack-mean curves). With only 6 real weakest-module curves total here,
@@ -196,7 +197,7 @@ def train_and_validate(data_folder=DATA_FOLDER, synth_per_crate=SYNTH_CURVES_PER
 
 if __name__ == "__main__":
     models = train_and_validate(DATA_FOLDER)
-    out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
+    out_dir = get_training_output_dir()
     for bucket, model in models.items():
         safe_name = bucket.replace('.', '_')
         path = os.path.join(out_dir, f'module_curve_reconstruction_model_{safe_name}.pkl')

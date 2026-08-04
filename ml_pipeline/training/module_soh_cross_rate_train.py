@@ -197,6 +197,7 @@ from build_module_dataset import DATA_FOLDER
 from module_soh_train import _c_rate_bucket, _soh_lookup, SLICE_PCTS
 from synthetic_cross_rate_generator import build_synthetic_cross_rate_module_rows
 from compute_device import get_xgb_device_params
+from model_versioning import get_training_output_dir
 
 SOURCE_BUCKET = '1.0C'
 TARGET_BUCKET = '0.3C'
@@ -377,9 +378,9 @@ if __name__ == "__main__":
     result = train_cross_rate_module_soh_model()
     if result:
         model, feats = result
-        out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
+        out_dir = get_training_output_dir()
         joblib.dump(model, os.path.join(out_dir, 'module_soh_model_1_0c_to_0_3c.pkl'))
         joblib.dump(feats, os.path.join(out_dir, 'module_feature_names_1_0c_to_0_3c.pkl'))
-        print("Saved module_soh_model_1_0c_to_0_3c.pkl")
+        print(f"Saved module_soh_model_1_0c_to_0_3c.pkl -> {out_dir}")
     else:
         print("No model was trained!")

@@ -40,6 +40,7 @@ from curve_utils import (
 from build_module_dataset import build_module_dataset, DATA_FOLDER
 from physics_calibration import calibrate as _pc_calibrate, structural_growth_delta as _pc_structural_growth_delta
 from compute_device import get_xgb_device_params
+from model_versioning import get_training_output_dir
 
 # Default is still the legacy path: validate_synthetic_module_generator.py's
 # generalization gate (train on synthetic only, evaluate on real holdout)
@@ -463,11 +464,11 @@ def train_module_soh_models(data_folder=DATA_FOLDER, synth_mode=None, seed=None)
 if __name__ == "__main__":
     trained_models = train_module_soh_models(seed=DEFAULT_TRAINING_SEED)
     if trained_models:
-        out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
+        out_dir = get_training_output_dir()
         for c_rate, (model, feats) in trained_models.items():
             c_str = str(c_rate).replace('.', '_')
             joblib.dump(model, os.path.join(out_dir, f'module_soh_model_{c_str}c.pkl'))
             joblib.dump(feats, os.path.join(out_dir, f'module_feature_names_{c_str}c.pkl'))
-            print(f"Saved module_soh_model_{c_str}c.pkl")
+            print(f"Saved module_soh_model_{c_str}c.pkl -> {out_dir}")
     else:
         print("No models were trained!")
