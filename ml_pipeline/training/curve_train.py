@@ -254,7 +254,9 @@ def train_crate_specific_models(data_folder):
 
 if __name__ == "__main__":
     from build_module_dataset import DATA_FOLDER
-    out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
+    # legacy/disabled model -- not loaded by app.py by default (see README) --
+    # saved into models_legacy/, not models/, so it doesn't mix with the active models
+    out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models_legacy')
     if os.path.exists(DATA_FOLDER):
         models = train_crate_specific_models(DATA_FOLDER)
         for c_rate_name, model in models.items():

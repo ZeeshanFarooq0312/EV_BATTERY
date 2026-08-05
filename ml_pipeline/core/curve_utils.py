@@ -269,12 +269,52 @@ def extract_module_features_from_slice(df_slice, module_cols):
         features['mean_dV_dAh'] = float(dV_dAh.mean())
         features['std_dV_dAh'] = float(dV_dAh.std())
         features['min_dV_dAh'] = float(dV_dAh.min())
+
+        # Curve-SHAPE features (slopes at different sections, curvature, where
+        # along the Ah axis the knee sits) -- already implemented in
+        # extract_enhanced_features and used by the curve-reconstruction
+        # pipeline (see reconstruct_module_curve), but never wired into the
+        # per-module SOH model before. Unlike end_voltage/voltage_drop, these
+        # are largely invariant to a module's own series resistance (a
+        # resistance offset shifts the whole curve's voltage LEVEL, not its
+        # slope/curvature/knee-position) -- meant to help the model tell
+        # "genuinely lower capacity" apart from "same capacity, more IR sag"
+        # (see pk1's documented m1-vs-m5 case: m5 sags more per Ah than m1
+        # despite m1 being the module that actually measured weaker).
+        #
+        # end_slope/end_voltage_drop (computed from int(len(slice) * 0.8) --
+        # a PROPORTIONAL position, not a fixed Ah window) were tried removed
+        # in an earlier iteration on the theory that they're noisy across
+        # real files of different lengths (confirmed on pk4's two real 1.0C
+        # SFT files: 1754 vs 1943 rows, end_voltage_drop swinging 0.489 vs
+        # 0.261 for the same module). That WAS true and fixed a cross-rate
+        # miss, but net-regressed the same-rate model badly (live test 9/11
+        # -> 6/11, breaking 3 previously-correct packs) -- kept in despite
+        # the known noise, since removing them cost more than it gained.
+        try:
+            shape_feats = extract_enhanced_features(mv.values, ah.values, stdv.values)
+            for key in ('initial_slope', 'final_slope', 'overall_slope', 'mean_curvature',
+                        'max_curvature', 'curvature_std', 'voltage_std', 'voltage_range',
+                        'plateau_length', 'end_slope', 'end_voltage_drop',
+                        'tail_knee_pct', 'tail_knee_slope'):
+                features[key] = shape_feats[key]
+        except Exception:
+            for key in ('initial_slope', 'final_slope', 'overall_slope', 'mean_curvature',
+                        'max_curvature', 'curvature_std', 'voltage_std', 'voltage_range',
+                        'plateau_length', 'end_slope', 'end_voltage_drop',
+                        'tail_knee_pct', 'tail_knee_slope'):
+                features[key] = 0.0
     else:
         features['delta_Ah'] = 0.0
         features['ah_per_voltage_drop'] = 0.0
         features['mean_dV_dAh'] = 0.0
         features['std_dV_dAh'] = 0.0
         features['min_dV_dAh'] = 0.0
+        for key in ('initial_slope', 'final_slope', 'overall_slope', 'mean_curvature',
+                    'max_curvature', 'curvature_std', 'voltage_std', 'voltage_range',
+                    'plateau_length', 'end_slope', 'end_voltage_drop',
+                    'tail_knee_pct', 'tail_knee_slope'):
+            features[key] = 0.0
 
     return features
 

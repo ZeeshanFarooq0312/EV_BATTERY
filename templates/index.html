@@ -415,6 +415,18 @@
             white-space: nowrap;
         }
 
+        .module-cutoff-line {
+            grid-column: 1 / -1;
+            font-size: 0.74rem;
+            color: var(--text-muted);
+            padding-left: 2px;
+        }
+
+        .module-cutoff-line strong {
+            color: var(--text-main);
+            font-variant-numeric: tabular-nums;
+        }
+
         .module-weakest-badge {
             font-size: 0.62rem;
             background-color: var(--danger);
@@ -445,6 +457,13 @@
             <p>Upload your SFT and FFT files to analyze battery health and reconstruct the complete global discharge curve.</p>
         </header>
 
+        <!-- Same-Rate Analysis: temporarily hidden. Not wrapped in an HTML comment because
+             the metric-card blocks below already contain their own HTML comments, and HTML
+             comments don't nest -- display:none on this wrapper hides it instead, without
+             disturbing any element IDs the JS (analyzeBattery()) still refers to. Remove
+             this wrapper div (and its matching closing div right before the Cross-Rate Tool
+             section-divider) to bring it back. -->
+        <div style="display:none">
         <div class="tool-header">
             <h2>Same-Rate Analysis</h2>
             <p>Upload a partial SFT and a complete FFT captured at the <strong>same C-rate</strong> to predict per-module SOH and reconstruct the full discharge curve.</p>
@@ -484,12 +503,12 @@
             </div>
             <!--
             <div class="metric-card cutoff">
-                <h3>Weakest Module Capacity @ 3.2V</h3>
+                <h3>Weakest Module Capacity @ 3.25V</h3>
                 <p class="value" id="cap32Value">-- Ah</p>
                 <p style="font-size: 0.75rem; color: var(--text-muted); margin: 4px 0 0 0;">Actual: <span id="cap32ActualValue">--</span> Ah</p>
             </div>
             <div class="metric-card cutoff">
-                <h3>Weakest Module SOH @ 3.2V</h3>
+                <h3>Weakest Module SOH @ 3.25V</h3>
                 <p class="value" id="soh32Value">--%</p>
                 <p style="font-size: 0.75rem; color: var(--text-muted); margin: 4px 0 0 0;">Actual: <span id="soh32ActualValue">--</span>%</p>
             </div>
@@ -530,7 +549,7 @@
             <h2>Weakest Module Voltage Curve</h2>
             <p style="color: var(--text-muted); margin-top: -10px; margin-bottom: 15px;">
                 The pack's weakest module's discharge curve: predicted (reconstructed from the uploaded SFT) vs the
-                complete real curve (from the uploaded FFT). Circles mark predicted capacity/SOH at 3.2V and 2.5V;
+                complete real curve (from the uploaded FFT). Circles mark predicted capacity/SOH at 3.25V and 2.5V;
                 triangles mark the actual values.
             </p>
             <img id="plotImage" src="" alt="Weakest Module Voltage Curve Plot">
@@ -551,6 +570,7 @@
             <div id="moduleRows"></div>
             <p class="module-error-msg" id="moduleErrorMsg"></p>
         </div>
+        </div><!-- end Same-Rate Analysis (display:none wrapper) -->
 
         <div class="section-divider"><span>Cross-Rate Tool</span></div>
 
@@ -628,7 +648,7 @@
                 <p class="value" id="wmModuleValue">--</p>
             </div>
             <div class="metric-card cutoff">
-                <h3>Capacity / SOH @ 3.2V</h3>
+                <h3>Capacity / SOH @ 3.25V</h3>
                 <p class="value" id="wm32Value" style="font-size:1.3rem;">--</p>
             </div>
             <div class="metric-card knee">
@@ -645,7 +665,7 @@
                 model shifted to this module's own voltage level. Solid blue is the module's own observed
                 data. Dashed red is the physics-based extrapolated tail, using the same tiered
                 knee-extrapolation / shape-transfer method as the FFT comparison flow. Markers show
-                capacity and SOH at 3.2V and 2.5V.
+                capacity and SOH at 3.25V and 2.5V.
             </p>
             <img id="wmPlotImage" src="" alt="Weakest Module Voltage Curve Plot">
         </div>
@@ -764,10 +784,10 @@
                     // removed, this is already shown directly on the plot's markers.
                     const wm = data.weakest_module_results;
                     if (false && wm) {
-                        document.getElementById('cap32Value').innerText = wm["3.2"].predicted.capacity_ah + " Ah";
-                        document.getElementById('cap32ActualValue').innerText = wm["3.2"].actual.capacity_ah;
-                        document.getElementById('soh32Value').innerText = wm["3.2"].predicted.soh + "%";
-                        document.getElementById('soh32ActualValue').innerText = wm["3.2"].actual.soh;
+                        document.getElementById('cap32Value').innerText = wm["3.25"].predicted.capacity_ah + " Ah";
+                        document.getElementById('cap32ActualValue').innerText = wm["3.25"].actual.capacity_ah;
+                        document.getElementById('soh32Value').innerText = wm["3.25"].predicted.soh + "%";
+                        document.getElementById('soh32ActualValue').innerText = wm["3.25"].actual.soh;
                         document.getElementById('cap25Value').innerText = wm["2.5"].predicted.capacity_ah + " Ah";
                         document.getElementById('cap25ActualValue').innerText = wm["2.5"].actual.capacity_ah;
                         document.getElementById('soh25Value').innerText = wm["2.5"].predicted.soh + "%";
@@ -838,6 +858,13 @@
                 if (isWeakestActual) badges += '<span class="module-weakest-badge">WEAKEST</span>';
                 if (isWeakestPred && !isWeakestActual) badges += '<span class="module-weakest-badge predicted">PRED. WEAKEST</span>';
 
+                const cutoffLine = (cv) => {
+                    const t = m.targets ? m.targets[cv] : null;
+                    const pred = t && t.predicted ? `${t.predicted.capacity_ah}Ah / ${t.predicted.soh}%` : 'n/a';
+                    const actual = t && t.actual ? `${t.actual.capacity_ah}Ah / ${t.actual.soh}%` : 'n/a';
+                    return `<div class="module-cutoff-line">@${cv}V &mdash; Predicted: <strong>${pred}</strong> &nbsp;|&nbsp; Actual: <strong>${actual}</strong></div>`;
+                };
+
                 row.innerHTML = `
                     <div class="module-label">Module ${m.module_idx}${badges}</div>
                     <div class="module-bar-group">
@@ -852,6 +879,8 @@
                         </div>
                         <div class="module-bar-value">${m.predicted_soh !== null ? m.predicted_soh.toFixed(2) + '% · ' + m.predicted_capacity.toFixed(2) + 'Ah' : '--'}</div>
                     </div>
+                    ${cutoffLine('3.25')}
+                    ${cutoffLine('2.5')}
                 `;
                 rowsContainer.appendChild(row);
             });
@@ -944,7 +973,7 @@
                 if (response.ok) {
                     document.getElementById('wmModuleValue').innerText = "Module " + data.weakest_module;
 
-                    const r32 = data.results["3.2"];
+                    const r32 = data.results["3.25"];
                     const r25 = data.results["2.5"];
                     document.getElementById('wm32Value').innerText = r32.capacity_ah + " Ah / " + r32.soh + "%";
                     document.getElementById('wm25Value').innerText = r25.capacity_ah + " Ah / " + r25.soh + "%";

@@ -39,6 +39,8 @@ from curve_utils import (
 )
 from build_module_dataset import build_module_dataset, DATA_FOLDER
 from physics_calibration import calibrate as _pc_calibrate, structural_growth_delta as _pc_structural_growth_delta
+from compute_device import get_xgb_device_params
+from model_versioning import get_training_output_dir
 
 # Default is still the legacy path: validate_synthetic_module_generator.py's
 # generalization gate (train on synthetic only, evaluate on real holdout)
@@ -409,7 +411,7 @@ def train_module_soh_models(data_folder=DATA_FOLDER, synth_mode=None, seed=None)
         for train_idx, test_idx in logo.split(X, y, groups):
             model = xgb.XGBRegressor(n_estimators=300, max_depth=3, learning_rate=0.05,
                                       objective='reg:squarederror', random_state=42,
-                                      reg_alpha=0.1, reg_lambda=1.0)
+                                      reg_alpha=0.1, reg_lambda=1.0, **get_xgb_device_params())
             model.fit(X.iloc[train_idx], y[train_idx], sample_weight=w[train_idx])
 
             # Evaluate on REAL rows only: the held-out pack's own synthetic
@@ -446,8 +448,14 @@ def train_module_soh_models(data_folder=DATA_FOLDER, synth_mode=None, seed=None)
             print(f"\n>>> AVERAGE LOPO module-SOH ERROR for {target_c}C: {np.mean(scores):.2f}% <<<\n")
             final_model = xgb.XGBRegressor(n_estimators=300, max_depth=3, learning_rate=0.05,
                                             objective='reg:squarederror', random_state=42,
-                                            reg_alpha=0.1, reg_lambda=1.0)
+                                            reg_alpha=0.1, reg_lambda=1.0, **get_xgb_device_params())
             final_model.fit(X, y, sample_weight=w)
+            # Trained on whatever device was fastest (GPU if available), but the
+            # SAVED model must not require a GPU to be present wherever app.py
+            # ends up serving it -- reset to CPU post-fit (this only changes
+            # which device .predict() uses, the already-learned trees are
+            # unaffected) before it gets pickled.
+            final_model.set_params(device='cpu')
             models[target_c] = (final_model, list(X.columns))
 
     return models
@@ -456,11 +464,11 @@ def train_module_soh_models(data_folder=DATA_FOLDER, synth_mode=None, seed=None)
 if __name__ == "__main__":
     trained_models = train_module_soh_models(seed=DEFAULT_TRAINING_SEED)
     if trained_models:
-        out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
+        out_dir = get_training_output_dir()
         for c_rate, (model, feats) in trained_models.items():
             c_str = str(c_rate).replace('.', '_')
             joblib.dump(model, os.path.join(out_dir, f'module_soh_model_{c_str}c.pkl'))
             joblib.dump(feats, os.path.join(out_dir, f'module_feature_names_{c_str}c.pkl'))
-            print(f"Saved module_soh_model_{c_str}c.pkl")
+            print(f"Saved module_soh_model_{c_str}c.pkl -> {out_dir}")
     else:
         print("No models were trained!")

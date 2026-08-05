@@ -350,8 +350,9 @@ if __name__ == "__main__":
         trained_models = train_separate_models(DATA_FOLDER)
         
         if trained_models:
-            # Save models
-            out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
+            # Save models -- legacy/disabled, not loaded by app.py by default (see README) --
+            # saved into models_legacy/, not models/, so it doesn't mix with the active models
+            out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models_legacy')
             for c_rate, (model, feats) in trained_models.items():
                 c_str = str(c_rate).replace('.', '_')
                 joblib.dump(model, os.path.join(out_dir, f'soh_model_{c_str}c.pkl'))
