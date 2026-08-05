@@ -9,6 +9,10 @@ import pandas as pd
 import re
 import warnings
 import traceback
+import subprocess
+import threading
+import time
+import uuid
 
 # CRITICAL FIX: Set matplotlib backend to 'Agg' BEFORE importing pyplot
 import matplotlib
@@ -17,6 +21,7 @@ import matplotlib.pyplot as plt
 
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d, median_filter
 from sklearn.isotonic import IsotonicRegression
@@ -92,6 +97,27 @@ app = FastAPI()
 os.makedirs('uploads', exist_ok=True)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Every route that generates a plot saves it here too (as a real .png,
+# alongside the base64 'plot' field already in the JSON response) --
+# lets anyone testing via Postman/curl just open the file directly instead
+# of decoding base64 by hand.
+PLOTS_DIR = os.path.join(APP_DIR, 'generated_plots')
+os.makedirs(PLOTS_DIR, exist_ok=True)
+
+
+def save_plot_image(img_bytes, prefix):
+    """Writes a plot's raw PNG bytes to PLOTS_DIR under a unique filename,
+    returns the absolute path. Filename includes a timestamp (for sorting/
+    cleanup) and a short uuid (so two requests in the same second never
+    collide)."""
+    fname = f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.png"
+    path = os.path.join(PLOTS_DIR, fname)
+    with open(path, 'wb') as f:
+        f.write(img_bytes)
+    return path
+
+
 ML_PIPELINE_DIR = os.path.join(APP_DIR, 'ml_pipeline')
 MODELS_LEGACY_DIR = os.path.join(ML_PIPELINE_DIR, 'models_legacy')  # disabled/legacy models -- see README
 sys.path.insert(0, os.path.join(ML_PIPELINE_DIR, 'core'))
@@ -239,17 +265,15 @@ MODULE_END_ANCHOR_V = 2.5
 # 4. Load per-(pack, C-rate bucket) weakest-module template curves, used as the
 # Tier-2 shape-transfer template for the SFT-only weakest-module endpoint (no
 # ground-truth FFT file to draw a same-test template from at inference time).
-# TEMPORARILY DISABLED for a test run to isolate the actual (Tier 0/Tier 1)
-# model behavior from this Tier-2 fallback. Any module that needs Tier 2 will
-# now raise/error instead of silently borrowing a cross-pack template -- that's
-# intentional for this test, re-enable by uncommenting below.
-# try:
-#     MODULE_TEMPLATES = load_module_templates()
-#     print(f"✅ Loaded {len(MODULE_TEMPLATES)} module template curves: {sorted(MODULE_TEMPLATES.keys())}")
-# except Exception as e:
-#     MODULE_TEMPLATES = {}
-#     print(f"⚠️ Could not load module template curves: {e}")
-MODULE_TEMPLATES = {}
+# Was temporarily disabled for a test run to isolate Tier 0/Tier 1 behavior
+# from this Tier-2 fallback -- re-enabled so /analyze_weakest_module (and its
+# plot) works again instead of unconditionally 500ing.
+try:
+    MODULE_TEMPLATES = load_module_templates()
+    print(f"✅ Loaded {len(MODULE_TEMPLATES)} module template curves: {sorted(MODULE_TEMPLATES.keys())}")
+except Exception as e:
+    MODULE_TEMPLATES = {}
+    print(f"⚠️ Could not load module template curves: {e}")
 
 
 def pick_template_curve(pack_id, c_bucket):
@@ -601,7 +625,7 @@ def analyze_modules(sft_df, fft_df, c_rate):
     }, None
 
 
-def analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df, pack_id=None):
+def analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df=None, pack_id=None):
     """Cross-rate per-module SOH: predicted 0.3C SOH from features extracted
     from an uploaded 1.0C-bucket SFT file (module_soh_cross_rate_train.py's
     model), and actual/ground-truth 0.3C SOH from an uploaded 0.3C FFT file
@@ -610,6 +634,11 @@ def analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df, pack_id=None):
     deliberately different C-rates (1.0C source, 0.3C target), not the same
     rate compared against itself. Returns (result_dict, error_message) --
     exactly one is None.
+
+    fft_df is optional -- pass None (see /analyze_cross_rate_weakest_module)
+    to get predictions only, with every actual/ground-truth field coming
+    back None, for the case where no 0.3C FFT was uploaded to validate
+    against.
 
     Also computes capacity/SOH at the two FIXED voltage cutoffs (3.25V, 2.5V)
     for every module, same idea as analyze_modules's target_cutoffs -- but
@@ -648,30 +677,32 @@ def analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df, pack_id=None):
         X = pd.DataFrame([row]).reindex(columns=module_soh_feature_names_cross_rate, fill_value=0)
         predicted[m] = float(module_soh_model_cross_rate.predict(X)[0])
 
-    fft_cell_cols = get_cell_columns(fft_df)
-    ah, pack_v, cell_std, modules = extract_and_resample_curve(fft_df, want_modules=True)
-    cutoff_v = float(fft_df[fft_cell_cols].min(axis=1).iloc[-1])
-
-    tier0 = {}
-    for m, traces in modules.items():
-        idx = find_crossing_index(ah, traces['min_v'], cutoff_v)
-        if idx is not None:
-            tier0[m] = _interp_crossing_ah(ah, traces['min_v'], idx, cutoff_v)
-
+    ah, modules = None, {}
     actual, actual_capacity, label_source = {}, {}, {}
-    if tier0:
-        weakest_module = min(tier0, key=tier0.get)
-        template_v = modules[weakest_module]['min_v']
+    if fft_df is not None:
+        fft_cell_cols = get_cell_columns(fft_df)
+        ah, pack_v, cell_std, modules = extract_and_resample_curve(fft_df, want_modules=True)
+        cutoff_v = float(fft_df[fft_cell_cols].min(axis=1).iloc[-1])
+
+        tier0 = {}
         for m, traces in modules.items():
-            if m in tier0:
-                capacity_ah, source = tier0[m], 'measured'
-            else:
-                capacity_ah, source, _diag = estimate_module_capacity(
-                    ah, traces['min_v'], cutoff_v, template_ah=ah, template_v=template_v,
-                )
-            actual[m] = compute_soh(capacity_ah)
-            actual_capacity[m] = capacity_ah
-            label_source[m] = source
+            idx = find_crossing_index(ah, traces['min_v'], cutoff_v)
+            if idx is not None:
+                tier0[m] = _interp_crossing_ah(ah, traces['min_v'], idx, cutoff_v)
+
+        if tier0:
+            weakest_module = min(tier0, key=tier0.get)
+            template_v = modules[weakest_module]['min_v']
+            for m, traces in modules.items():
+                if m in tier0:
+                    capacity_ah, source = tier0[m], 'measured'
+                else:
+                    capacity_ah, source, _diag = estimate_module_capacity(
+                        ah, traces['min_v'], cutoff_v, template_ah=ah, template_v=template_v,
+                    )
+                actual[m] = compute_soh(capacity_ah)
+                actual_capacity[m] = capacity_ah
+                label_source[m] = source
 
     # Capacity/SOH at the two fixed voltage cutoffs (3.25V, 2.5V), per module.
     # Tier-2 fallback template for the ACTUAL side: pick_template_curve() reads
@@ -839,6 +870,7 @@ def analyze(sft_file: UploadFile | None = File(None), fft_file: UploadFile | Non
         # pure friction, not a real constraint of the method.
         weakest_module_results = None
         weakest_module_plot_url = None
+        weakest_module_plot_path = None
         target_module = module_result['weakest_module_predicted'] if module_result else None
         if target_module is not None:
             pack_id, _ = parse_pack_and_crate(sft_file.filename)
@@ -954,8 +986,9 @@ def analyze(sft_file: UploadFile | None = File(None), fft_file: UploadFile | Non
             plt.savefig(wm_img, format='png', dpi=100, bbox_inches='tight')
             wm_img.seek(0)
             weakest_module_plot_url = base64.b64encode(wm_img.getvalue()).decode()
+            weakest_module_plot_path = save_plot_image(wm_img.getvalue(), 'analyze_weakest_module')
             plt.close()
-            print("Weakest-module plot generated successfully")
+            print(f"Weakest-module plot generated successfully -> {weakest_module_plot_path}")
 
         if recon_ah is None:
             mae = None
@@ -1000,7 +1033,8 @@ def analyze(sft_file: UploadFile | None = File(None), fft_file: UploadFile | Non
             'weakest_module_predicted': module_result['weakest_module_predicted'] if module_result else None,
             'weakest_module_actual': module_result['weakest_module_actual'] if module_result else None,
             'module_error': module_error,
-            'plot': weakest_module_plot_url
+            'plot': weakest_module_plot_url,
+            'plot_path': weakest_module_plot_path,
         }
 
     except Exception as e:
@@ -1065,6 +1099,7 @@ def analyze_cross_rate(sft_file: UploadFile | None = File(None), fft_file: Uploa
         # straight from the uploaded FFT (exact ground truth, no
         # extrapolation needed since the FFT is a complete discharge).
         plot_url = None
+        plot_path = None
         target_module = module_result['weakest_module_predicted']
         if target_module is not None:
             try:
@@ -1095,8 +1130,9 @@ def analyze_cross_rate(sft_file: UploadFile | None = File(None), fft_file: Uploa
                 plt.savefig(cr_img, format='png', dpi=100, bbox_inches='tight')
                 cr_img.seek(0)
                 plot_url = base64.b64encode(cr_img.getvalue()).decode()
+                plot_path = save_plot_image(cr_img.getvalue(), 'analyze_cross_rate')
                 plt.close()
-                print("[cross-rate] Curve reconstruction plot generated successfully")
+                print(f"[cross-rate] Curve reconstruction plot generated successfully -> {plot_path}")
             except Exception as e:
                 print(f"⚠️ [cross-rate] Curve reconstruction plot unavailable: {e}")
                 print(traceback.format_exc())
@@ -1110,10 +1146,113 @@ def analyze_cross_rate(sft_file: UploadFile | None = File(None), fft_file: Uploa
             'weakest_module_predicted': module_result['weakest_module_predicted'],
             'weakest_module_actual': module_result['weakest_module_actual'],
             'plot': plot_url,
+            'plot_path': plot_path,
         }
 
     except Exception as e:
         print(f"❌ Error in analyze_cross_rate endpoint: {str(e)}")
+        print(traceback.format_exc())
+        return JSONResponse({'error': f'Server error: {str(e)}'}, status_code=500)
+
+
+@app.post('/analyze_cross_rate_weakest_module')
+def analyze_cross_rate_weakest_module(sft_file: UploadFile | None = File(None)):
+    """SFT-only cross-rate: upload just a 1.0C SFT file to predict every
+    module's 0.3C SOH/capacity via the cross-rate model (module_soh_cross_
+    rate_train.py) -- no 0.3C FFT ground-truth file required. Mirrors
+    /analyze_weakest_module's SFT-only same-rate flow, but for cross-rate:
+    reuses analyze_modules_cross_rate with fft_df=None (which comes back with
+    every actual/ground-truth field null, since there's no FFT to validate
+    against), then strips those null fields out entirely before responding --
+    this route's response only ever contains predicted values."""
+    try:
+        if sft_file is None:
+            return JSONResponse({'error': 'Please upload a 1.0C SFT file.'}, status_code=400)
+        if sft_file.filename == '':
+            return JSONResponse({'error': 'No selected file.'}, status_code=400)
+
+        print(f"[cross-rate, SFT-only] Reading SFT (1.0C) file: {sft_file.filename}")
+        sft_df = pd.read_csv(sft_file.file)
+
+        c_rate_match = re.search(r'(\d+(?:\.\d+)?)C', sft_file.filename)
+        sft_c_rate = float(c_rate_match.group(1)) if c_rate_match else 1.0
+        if abs(sft_c_rate - 0.95) < 0.05:
+            sft_c_rate = 1.0
+        if abs(sft_c_rate - 1.0) > 0.15:
+            print(f"⚠️ [cross-rate, SFT-only] SFT file's own C-rate ({sft_c_rate}) doesn't look like 1.0C -- "
+                  f"this model was only trained/validated for a 1.0C-bucket source file.")
+
+        pack_id, _ = parse_pack_and_crate(sft_file.filename)
+        module_result, module_error = analyze_modules_cross_rate(sft_df, sft_c_rate, fft_df=None, pack_id=pack_id)
+        if module_error:
+            print(f"⚠️ [cross-rate, SFT-only] Module analysis failed: {module_error}")
+            return JSONResponse({'error': module_error}, status_code=400)
+
+        # No FFT was uploaded, so every actual_soh/actual_capacity/
+        # label_source/targets['actual'] field analyze_modules_cross_rate
+        # returns is unconditionally null -- strip them here rather than
+        # shipping a response full of nulls the caller can never populate
+        # through this route.
+        modules_result = []
+        for m in module_result['modules']:
+            targets = m.get('targets') or {}
+            clean_targets = {cv: entry['predicted'] for cv, entry in targets.items() if entry.get('predicted')}
+            modules_result.append({
+                'module_idx': m['module_idx'],
+                'predicted_soh': m['predicted_soh'],
+                'predicted_capacity': m['predicted_capacity'],
+                'targets': clean_targets,
+            })
+
+        weakest_module = module_result['weakest_module_predicted']
+        weakest_entry = next(m for m in modules_result if m['module_idx'] == weakest_module)
+        pred_soh = weakest_entry['predicted_soh']
+        pred_capacity = weakest_entry['predicted_capacity']
+        print(f"[cross-rate, SFT-only] Predicted weakest module (from 1.0C SFT): "
+              f"{weakest_module} -> {pred_soh:.2f}% / {pred_capacity:.2f} Ah")
+
+        plot_url = None
+        plot_path = None
+        try:
+            recon_ah, recon_v = reconstruct_cross_rate_module_curve(pack_id, pred_capacity)
+            plt.figure(figsize=(10, 6))
+            plt.plot(recon_ah, recon_v, label=f'Module {weakest_module} (Predicted 0.3C, shape-transferred)',
+                     color='#dc2626', linewidth=2.5, linestyle='--')
+            marker_colors = {'3.25': '#f59e0b', '2.5': '#a855f7'}
+            for cv_str, pred_entry in (weakest_entry.get('targets') or {}).items():
+                plt.scatter([pred_entry['capacity_ah']], [float(cv_str)], color=marker_colors.get(cv_str, '#f59e0b'),
+                            s=150, zorder=5, marker='o', edgecolors='white', linewidths=2,
+                            label=f"{cv_str}V -> {pred_entry['capacity_ah']} Ah, SOH {pred_entry['soh']}%")
+            plt.title(f'Weakest Module (Module {weakest_module}) -- Predicted 0.3C Curve (from 1.0C SFT)',
+                      fontsize=13, fontweight='bold', pad=15)
+            plt.xlabel('Capacity Delivered (Ah)', fontsize=12)
+            plt.ylabel('Min Cell Voltage in Module (V)', fontsize=12)
+            plt.legend(loc='upper right', fontsize=9)
+            plt.grid(True, linestyle=':', alpha=0.6)
+            plt.ylim(1.8, 4.3)
+            plt.tight_layout()
+            img = io.BytesIO()
+            plt.savefig(img, format='png', dpi=100, bbox_inches='tight')
+            img.seek(0)
+            plot_url = base64.b64encode(img.getvalue()).decode()
+            plot_path = save_plot_image(img.getvalue(), 'analyze_cross_rate_weakest_module')
+            plt.close()
+            print(f"[cross-rate, SFT-only] Plot generated successfully -> {plot_path}")
+        except Exception as e:
+            print(f"⚠️ [cross-rate, SFT-only] Curve reconstruction plot unavailable: {e}")
+            print(traceback.format_exc())
+
+        return {
+            'soh': round(pred_soh, 2),
+            'capacity': round(pred_capacity, 2),
+            'weakest_module_predicted': weakest_module,
+            'modules': modules_result,
+            'plot': plot_url,
+            'plot_path': plot_path,
+        }
+
+    except Exception as e:
+        print(f"❌ Error in analyze_cross_rate_weakest_module endpoint: {str(e)}")
         print(traceback.format_exc())
         return JSONResponse({'error': f'Server error: {str(e)}'}, status_code=500)
 
@@ -1281,8 +1420,9 @@ def analyze_weakest_module(sft_file: UploadFile | None = File(None)):
         plt.savefig(img, format='png', dpi=100, bbox_inches='tight')
         img.seek(0)
         plot_url = base64.b64encode(img.getvalue()).decode()
+        plot_path = save_plot_image(img.getvalue(), 'analyze_weakest_module')
         plt.close()
-        print("Plot generated successfully")
+        print(f"Plot generated successfully -> {plot_path}")
 
         return {
             'weakest_module': weakest_module,
@@ -1291,6 +1431,7 @@ def analyze_weakest_module(sft_file: UploadFile | None = File(None)):
             'template_used': template_used,
             'head_reconstructed': len(head_ah) > 0,
             'plot': plot_url,
+            'plot_path': plot_path,
         }
 
     except Exception as e:
@@ -1365,6 +1506,95 @@ def upload_training_data(files: list[UploadFile] = File(...)):
         'total_count': len(results),
         'data_folder': DATA_FOLDER,
     })
+
+
+# ==========================================
+# TRAINING API (async job) -- POST /train_models to start, GET /train_status/{job_id} to poll
+# ==========================================
+# A full retrain (cleaning + all 3 active training scripts) takes 5-30
+# minutes, far too long for a normal blocking HTTP request/timeout -- so
+# /train_models kicks it off as a background subprocess and returns
+# immediately with a job_id; /train_status/{job_id} reports progress (tailed
+# log output) and the final result. TRAIN_JOBS is in-memory only -- like
+# everything else in this file, it resets if the app restarts, so a job's
+# status becomes unknown (404) across a restart; the training run itself
+# (a separate subprocess) is unaffected and keeps writing its own log file.
+TRAIN_JOBS_DIR = os.path.join(APP_DIR, 'train_jobs')
+os.makedirs(TRAIN_JOBS_DIR, exist_ok=True)
+TRAIN_JOBS = {}
+
+
+class TrainRequest(BaseModel):
+    raw_folder: str
+
+
+def _run_training_job(job_id, raw_folder):
+    log_path = os.path.join(TRAIN_JOBS_DIR, f'{job_id}.log')
+    TRAIN_JOBS[job_id]['log_file'] = log_path
+    pipeline_script = os.path.join(APP_DIR, 'run_full_pipeline.py')
+    try:
+        with open(log_path, 'w') as log_fh:
+            proc = subprocess.run(
+                [sys.executable, pipeline_script],
+                input=raw_folder + '\n', text=True,
+                stdout=log_fh, stderr=subprocess.STDOUT, cwd=APP_DIR,
+            )
+        TRAIN_JOBS[job_id]['returncode'] = proc.returncode
+        TRAIN_JOBS[job_id]['status'] = 'completed' if proc.returncode == 0 else 'failed'
+    except Exception as e:
+        TRAIN_JOBS[job_id]['status'] = 'failed'
+        TRAIN_JOBS[job_id]['error'] = str(e)
+    finally:
+        TRAIN_JOBS[job_id]['finished_at'] = time.time()
+
+
+@app.post('/train_models')
+def train_models(req: TrainRequest):
+    """Starts a full retrain -- cleans every CSV in req.raw_folder (a path on
+    the SERVER's filesystem, same as what run_full_pipeline.py's interactive
+    prompt asks for) and retrains all 3 active models -- as a background
+    subprocess, and returns a job_id immediately rather than blocking for the
+    5-30 minutes the run actually takes. Poll GET /train_status/{job_id} for
+    progress. A successful run lands in a new ml_pipeline/models/vN/ folder;
+    restart the app afterward to start serving it (see model_versioning.py --
+    it's picked up automatically, no config needed)."""
+    if not os.path.isdir(req.raw_folder):
+        return JSONResponse(
+            {'error': f"'{req.raw_folder}' is not a folder that exists on the server running this app."},
+            status_code=400,
+        )
+    job_id = uuid.uuid4().hex[:8]
+    TRAIN_JOBS[job_id] = {
+        'status': 'running', 'started_at': time.time(), 'raw_folder': req.raw_folder, 'log_file': None,
+    }
+    thread = threading.Thread(target=_run_training_job, args=(job_id, req.raw_folder), daemon=True)
+    thread.start()
+    return {'job_id': job_id, 'status': 'running', 'poll_at': f'/train_status/{job_id}'}
+
+
+@app.get('/train_status/{job_id}')
+def train_status(job_id: str):
+    job = TRAIN_JOBS.get(job_id)
+    if job is None:
+        return JSONResponse(
+            {'error': "Unknown job_id (job list is in-memory and resets if the app restarts)."},
+            status_code=404,
+        )
+    resp = {
+        'job_id': job_id, 'status': job['status'],
+        'started_at': job['started_at'], 'raw_folder': job['raw_folder'],
+    }
+    if job.get('finished_at'):
+        resp['finished_at'] = job['finished_at']
+        resp['elapsed_minutes'] = round((job['finished_at'] - job['started_at']) / 60, 1)
+        resp['returncode'] = job.get('returncode')
+    if job.get('error'):
+        resp['error'] = job['error']
+    if job.get('log_file') and os.path.exists(job['log_file']):
+        with open(job['log_file']) as f:
+            content = f.read()
+        resp['log_tail'] = content[-4000:]  # last ~4000 chars -- enough to see current progress/errors
+    return resp
 
 
 if __name__ == '__main__':

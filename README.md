@@ -50,6 +50,10 @@ Each run saves its models into a new, numbered folder (`ml_pipeline/models/v2/`,
 
 If a new retrain turns out worse, you don't need to retrain again to undo it: open `ml_pipeline/models/ACTIVE_VERSION` and put the older version's name in it (e.g. `v1`), then restart the app. It'll keep using that version until you change it back to `latest`.
 
+## Testing the API directly (Postman)
+
+The app can also be tested endpoint-by-endpoint in Postman (or curl) instead of through the web page — useful for checking a specific result without uploading files by hand each time. The full list of endpoints, what to send, and what comes back is in [ARCHITECTURE.md](ARCHITECTURE.md#api-reference-postman--curl).
+
 ## Project structure
 
 ```
@@ -59,6 +63,7 @@ new_tech/
 ├── templates/index.html    # Web page
 ├── clean_data_for_test/    # Training data currently in use
 ├── raw_uploads/            # Drop new raw data files here before cleaning
+├── generated_plots/        # Every plot any API route generates is saved here as a .png
 └── ml_pipeline/            # Training scripts, saved models, and shared code
     └── models/
         ├── ACTIVE_VERSION  # Which version to use -- "latest" (default) or a specific one like "v1"

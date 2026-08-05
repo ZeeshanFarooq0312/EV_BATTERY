@@ -330,6 +330,51 @@ The same cleaning is also reachable as an API route, `POST /upload_training_data
 
 **What "clean" means**: compare any file in `BS_Data/` (raw) against the same pack/test in `new_tech/clean_data_for_test/OneDrive_1_7-9-2026_CLEANED/` (cleaned) to see the difference directly. A raw export bundles the pre-test charge, a rest period, the real discharge, and a post-test rest/recharge all in one file; "cleaning" means keeping **only the rows where the pack is actually discharging** (`LoadUnitCurrent` below a small negative threshold, for the longest contiguous run — see `find_discharge_block` in `raw_file_cleaner.py`) and adding the `min_v` column (row-wise min across all 108 `Cell NNN` columns) that every cleaned file already carries. If a file's `LoadUnitCurrent` column is already all-negative (no charge/rest sections), it's already clean — cleaning it again is harmless (it becomes a no-op trim, `min_v` gets added if missing).
 
+## API reference (Postman / curl)
+
+Every route below is a plain HTTP endpoint on the running app (`http://127.0.0.1:5000`) — test any of them directly in Postman (or curl) without going through the web page. File inputs use `multipart/form-data` (Postman: Body → form-data → set the field's type to **File**); the two training routes use a plain JSON body (Postman: Body → raw → JSON).
+
+**Viewing a plot**: every route that generates one returns it two ways — `plot`, a base64-encoded PNG you can render inline (in Postman, open the response's **Visualize** tab and paste `<img src="data:image/png;base64,{{response.plot}}">`), and `plot_path`, the absolute path where that same image was also saved as a real `.png` file on the server, under `generated_plots/`. Easiest option: just open `plot_path` directly in an image viewer/file browser on the machine running the app — nothing to decode.
+
+### Inference
+
+**`POST /analyze`** — same-rate: upload an SFT and an FFT captured at the *same* C-rate.
+- Form-data fields: `sft_file` (file), `fft_file` (file)
+- Response: `{ soh, capacity, actual_soh, actual_capacity, weakest_module_predicted, weakest_module_actual, modules: [...], mae, pred_knee_ah, actual_knee_ah, plot, plot_path }` — `modules` is a list of 9 entries (`module_idx`, `predicted_soh`, `actual_soh`, `predicted_capacity`, `actual_capacity`, `label_source`).
+- Errors: `400` (missing/invalid files, no model for that C-rate), `500` (`{ error }`)
+
+**`POST /analyze_cross_rate`** — cross-rate: upload a 1.0C SFT + a 0.3C FFT (ground truth, optional-in-spirit but currently required by this route).
+- Form-data fields: `sft_file` (file), `fft_file` (file)
+- Response: `{ soh, capacity, actual_soh, actual_capacity, weakest_module_predicted, weakest_module_actual, modules: [...], plot, plot_path }` — each entry in `modules` also carries `targets` (predicted/actual capacity + SOH at 3.25V and 2.5V).
+- Errors: `400`, `500`
+
+**`POST /analyze_cross_rate_weakest_module`** — cross-rate, SFT-only: upload just a 1.0C SFT to predict every module's 0.3C SOH/capacity, no 0.3C FFT ground-truth file needed.
+- Form-data field: `sft_file` (file)
+- Response: `{ soh, capacity, weakest_module_predicted, modules: [...], plot, plot_path }` — predictions only, no `actual_*`/ground-truth fields at all (nothing to validate against without an FFT, so they're left out rather than sent as `null`). Each entry in `modules` is `{ module_idx, predicted_soh, predicted_capacity, targets: {"3.25": {capacity_ah, soh}, "2.5": {capacity_ah, soh}} }`.
+- Errors: `400`, `500`
+
+**`POST /analyze_weakest_module`** — same-rate, SFT-only: no ground-truth file needed.
+- Form-data field: `sft_file` (file)
+- Response: `{ weakest_module, predicted_soh_by_module: {"1": 96.2, ...}, results: {"3.25": {...}, "2.5": {...}}, template_used, plot, plot_path }`
+- Errors: `400`, `500`
+
+**`POST /upload_training_data`** — cleans one or more raw CSVs into the training data folder (does **not** retrain).
+- Form-data field: `files` (one or more files)
+- Response: `{ results: [{filename, status, raw_rows, cleaned_rows, pack_id, c_rate}, ...], cleaned_count, total_count, data_folder }`
+
+### Training
+
+**`POST /train_models`** — starts a full retrain (clean + train all 3 active models) as a background job; returns immediately instead of blocking for the 5-30 minutes it actually takes.
+- JSON body: `{ "raw_folder": "<path to a raw dataset folder on the server>" }`
+- Response: `{ job_id, status: "running", poll_at: "/train_status/<job_id>" }`
+- Errors: `400` if `raw_folder` doesn't exist on the server
+
+**`GET /train_status/{job_id}`** — poll this with the `job_id` from above.
+- Response while running: `{ job_id, status: "running", started_at, raw_folder, log_tail }` (`log_tail` is the last ~4000 characters of live progress output)
+- Response when done: adds `finished_at`, `elapsed_minutes`, `returncode`, and `status` becomes `"completed"` or `"failed"` (plus `error` if it crashed outright)
+- Errors: `404` if the job_id is unknown (the job list is in-memory and resets if the app restarts — the training run itself is unaffected, only status polling is lost)
+- After a successful run, restart the app to start serving the new model version (it's picked up automatically — see "Retraining manually" above).
+
 ## Known limitations
 
 - **Data scarcity**: only 6 real packs. A shared, shallow (regularized) tree model has limited capacity to fit one pack's narrow SOH range without affecting predictions for other packs nearby in feature space — reweighting one pack's data to fix its calibration reliably costs a little accuracy on its closest real neighbor. Fixing this for real needs either more real packs or a two-stage architecture (separate ranking model from absolute-level model), not further data-reweighting. This also limits how much a per-session feature (temperature, actual measured current) can help even when well-motivated — see the cross-rate model's docstring for two documented attempts that didn't survive validation for exactly this reason.
